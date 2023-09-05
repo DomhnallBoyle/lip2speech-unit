@@ -95,9 +95,11 @@ def init_worker(queue, arguments):
 
     a = arguments
     idx = queue.get()
-    device = 0 #idx
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
-    if os.path.isdir(a.checkpoint_file):
+    if a.config_file:
+        config_file = a.config_file
+    elif os.path.isdir(a.checkpoint_file):
         config_file = os.path.join(a.checkpoint_file, 'config.json')
     else:
         config_file = os.path.join(os.path.split(a.checkpoint_file)[0], 'config.json')
@@ -170,6 +172,7 @@ def main():
     parser.add_argument('--pad', default=None, type=int)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('-n', type=int, default=10)
+    parser.add_argument('--config_file')
     a = parser.parse_args()
 
     seed = 52
@@ -183,7 +186,9 @@ def main():
     for i in ids:
         idQueue.put(i)
 
-    if os.path.isdir(a.checkpoint_file):
+    if a.config_file:
+        config_file = a.config_file
+    elif os.path.isdir(a.checkpoint_file):
         config_file = os.path.join(a.checkpoint_file, 'config.json')
     else:
         config_file = os.path.join(os.path.split(a.checkpoint_file)[0], 'config.json')
@@ -235,7 +240,7 @@ def main():
     else:
         idx = list(range(len(dataset)))
         random.shuffle(idx)
-        with Pool(8, init_worker, (idQueue, a)) as pool:
+        with Pool(1, init_worker, (idQueue, a)) as pool:
             for i, _ in enumerate(pool.imap(inference, idx), 1):
                 bar = progbar(i, len(idx))
                 message = f'{bar} {i}/{len(idx)} '

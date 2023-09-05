@@ -44,6 +44,7 @@ def load_audio_visual(manifest_path, max_keep, min_keep, frame_rate, label_paths
     names, inds, sizes = [], [], []
     dur_from_label_list = []
     is_seq_label = any([x==-1 for x in label_rates])
+    print(label_paths, label_rates)
     for label_path, label_rate in zip(label_paths, label_rates):
         label_lengths = [len(line.rstrip().split())/label_rate for line in open(label_path).readlines()]
         dur_from_label_list.append(label_lengths)
@@ -59,6 +60,10 @@ def load_audio_visual(manifest_path, max_keep, min_keep, frame_rate, label_paths
             elif max_keep is not None and sz > max_keep:
                 n_long += 1
             elif (not is_seq_label) and (not is_audio_label_aligned(sz/frame_rate, dur_from_label_list[ind])):
+                video_dur = sz / frame_rate
+                audio_dur = dur_from_label_list[ind][0]
+                diff = abs(video_dur - audio_dur)
+                print(video_dur, audio_dur, diff, tol)
                 n_unaligned += 1
             else:
                 video_path = items[1]
@@ -411,7 +416,8 @@ class AVHubertDataset(FairseqDataset):
         batch = {
             "id": torch.LongTensor([s["id"] for s in samples]),
             "net_input": net_input,
-            "utt_id": [s['fid'] for s in samples]
+            "utt_id": [s['fid'] for s in samples],
+            "names": [s['names'] for s in samples]
         }
 
         if self.single_target:

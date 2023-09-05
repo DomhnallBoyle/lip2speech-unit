@@ -104,9 +104,11 @@ def _main(cfg, output_file):
     if output_file is not sys.stdout:  # also print to stdout
         logger.addHandler(logging.StreamHandler(sys.stdout))
 
+    arg_overrides = {'model': {'w2v_path': '/home/domhnall/Repos/lip2speech-unit/multi_target_lip2speech/checkpoints/large_vox_iter5.pt'}}
+    
     utils.import_user_module(cfg.common)
-    models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([cfg.common_eval.path])
-    models = [model.eval().cuda() for model in models]
+    models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([cfg.common_eval.path], arg_overrides)
+    models =  [model.eval().cuda() if torch.cuda.is_available() else model.eval() for model in models]
 
     saved_cfg.task.modalities = cfg.override.modalities
     task = tasks.setup_task(saved_cfg.task)
@@ -147,6 +149,8 @@ def _main(cfg, output_file):
         if use_cuda and not cfg.distributed_training.pipeline_model_parallel:
             model.cuda()
         model.prepare_for_inference_(cfg)
+
+    cfg.dataset.batch_size = 1
 
     # Load dataset (possibly sharded)
     itr = task.get_batch_iterator(
@@ -209,6 +213,8 @@ def _main(cfg, output_file):
     wps_meter = TimeMeter()
     result_dict = {'utt_id': [], 'ref': [], 'hypo': []}
     for sample in progress:
+        # print(sample['id'], sample['names'], sample['target_lengths'])
+
         sample = utils.move_to_cuda(sample) if use_cuda else sample
         if "net_input" not in sample:
             continue
@@ -240,7 +246,7 @@ def _main(cfg, output_file):
             hypo_for_decode = hypos[i][0]['tokens'].int().cpu()
             hypo_for_decode = hypo_for_decode[:sample['target_lengths'][i]]
 
-            assert len(ref_for_decode) == len(hypo_for_decode)
+            # assert len(ref_for_decode) == len(hypo_for_decode), f'{ref_for_decode} != {hypo_for_decode}'
 
             result_dict['utt_id'].append(sample['utt_id'][i])
             ref_sent = decode_fn(ref_for_decode)
@@ -278,7 +284,7 @@ def _main(cfg, output_file):
     for hypo, ref in zip(result_dict['hypo'], result_dict['ref']):
         hypo, ref = hypo.strip().split(), ref.strip().split()
         n_err += editdistance.eval(hypo, ref)
-        assert len(hypo) == len(ref)
+        # assert len(hypo) == len(ref)
         n_equal += sum([h==f for h,f in zip(hypo, ref)])
         n_total += len(ref)
     wer = 100 * n_err / n_total

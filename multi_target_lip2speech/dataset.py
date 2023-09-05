@@ -157,6 +157,7 @@ class MultiTargetDataset(AVHubertDataset):
 
         sample["mel"] = mel
         sample["spk_emb"] = spk_emb
+        sample['names'] = self.names[index]
 
         return sample
 

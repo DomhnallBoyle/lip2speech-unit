@@ -1,0 +1,7 @@
+__pycache__
+static
+datasets
+*results*
+*checkpoints*
+*outputs*
+fairseq
