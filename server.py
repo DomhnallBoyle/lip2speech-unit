@@ -8,15 +8,18 @@ import uuid
 from http import HTTPStatus
 from os.path import exists
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import requests
 import soundfile as sf
 import torch
 from flask import Flask, current_app, g as app_context, redirect, request, url_for
 
+from create_dataset import manifests as create_manifests, vocoder as setup_vocoder_inference
 sys.path.append('/home/domhnall/Repos/sv2s')
 from asr import WhisperASR
-from utils import convert_fps, get_fps, get_speaker_embedding, get_video_frames, overlay_audio
+from utils import convert_fps, convert_video_codecs, get_fps, get_speaker_embedding, get_video_frames, overlay_audio
 
 FPS = 25
 SAMPLING_RATE = 16000
@@ -368,10 +371,12 @@ def web_app():
             f.write(f'{TYPE}/{name}\n')
 
         # extract mouth frames
-        run_command(f'./extract_mouth_frames.sh {WORKING_DIRECTORY}')
+        response = requests.post('http://127.0.0.1:5001/extract_mouth_frames', json={'root': str(WORKING_DIRECTORY)})
+        if response.status_code != HTTPStatus.NO_CONTENT:
+            return {'message': 'Failed to extract mouth frames'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         # create manifests
-        run_command(f'python create_dataset.py {TYPE} {WORKING_DIRECTORY} manifests')
+        create_manifests(SimpleNamespace(**{'type': TYPE, 'dataset_directory': WORKING_DIRECTORY}))
 
         # extract speech units
         num_speech_units = int(video_duration * AUDIO_FRAME_RATE)
@@ -383,13 +388,21 @@ def web_app():
         run_command(f'export CUDA_VISIBLE_DEVICES="{device}"; ./synthesise.sh {LABEL_DIRECTORY} {SYNTHESIS_DIRECTORY}')
 
         # setup vocoder directory
-        run_command(f'python create_dataset.py {TYPE} {WORKING_DIRECTORY} vocoder {SYNTHESIS_DIRECTORY}')
+        setup_vocoder_inference(SimpleNamespace(**{'type': TYPE, 'dataset_directory': WORKING_DIRECTORY, 'synthesis_directory': SYNTHESIS_DIRECTORY}))
 
         # run vocoder
         run_command(f'export CUDA_VISIBLE_DEVICES="{device}"; ./vocoder.sh {SYNTHESIS_DIRECTORY.joinpath("vocoder")} {VOCODER_DIRECTORY}')
 
         # overlay onto video
-        overlay_audio(video_raw_path, pred_audio_path, video_download_path)
+        overlay_audio(video_raw_path, pred_audio_path, video_upload_path)
+
+        # browser video playback compatibility, h264 is pretty universal
+        convert_video_codecs(
+            input_video_path=video_upload_path,
+            video_codec='libx264',
+            audio_codec='aac',
+            output_video_path=video_download_path
+        )
 
         # get asr results
         asr_preds = asr.run(pred_audio_path)
