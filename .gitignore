@@ -1,6 +1,8 @@
 __pycache__
 static
-datasets
+!datasets
+datasets/*
+!datasets/*.mp4
 *results*
 *checkpoints*
 *outputs*

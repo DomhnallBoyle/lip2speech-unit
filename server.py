@@ -1,4 +1,5 @@
 import argparse
+import pickle
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from flask import Flask, current_app, g as app_context, redirect, request, url_f
 from create_dataset import manifests as create_manifests, vocoder as setup_vocoder_inference
 sys.path.append('/home/domhnall/Repos/sv2s')
 from asr import WhisperASR
+from detector import get_face_landmarks
 from utils import convert_fps, convert_video_codecs, get_fps, get_speaker_embedding, get_video_frames, overlay_audio
 
 FPS = 25
@@ -47,6 +49,16 @@ sem = threading.Semaphore()
 
 def run_command(s):
     subprocess.run(s, shell=True)
+
+
+def execute_request(name, r, *args, **kwargs):
+    start_time = time.time()
+    response = r(*args, **kwargs)
+    time_taken = round(time.time() - start_time, 2)
+
+    print(f'Request [{name}] took {time_taken} secs')
+    
+    return response
 
 
 def web_app():
@@ -293,7 +305,7 @@ def web_app():
                         var parentDiv = button.parentNode;
                         parentDiv.remove();
 
-                        // fix history counter
+                        // reset counter of history elements
                         historyCounter = 0;
                         var historyDiv = document.getElementById("history");
                         var historyElements = historyDiv.childNodes;
@@ -326,6 +338,7 @@ def web_app():
         video_upload_path = str(INPUTS_PATH.joinpath(f'{name}.mp4'))
         audio_upload_path = str(INPUTS_PATH.joinpath(f'{name}.wav'))
         video_raw_path = str(VIDEO_RAW_DIRECTORY.joinpath(f'{name}.mp4'))
+        video_landmarks_path = str(LANDMARKS_DIRECTORY.joinpath(f'{name}.pkl'))
         audio_path = str(AUDIO_DIRECTORY.joinpath(f'{name}.wav'))
         pred_audio_path = str(VOCODER_DIRECTORY.joinpath(f'pred_wav/{TYPE}/{name}.wav'))
         video_download_path = str(STATIC_PATH.joinpath(f'{name}.mp4'))
@@ -371,7 +384,10 @@ def web_app():
             f.write(f'{TYPE}/{name}\n')
 
         # extract mouth frames
-        response = requests.post('http://127.0.0.1:5001/extract_mouth_frames', json={'root': str(WORKING_DIRECTORY)})
+        face_landmarks = get_face_landmarks(video_path=video_raw_path)[1]
+        with open(video_landmarks_path, 'wb') as f:
+            pickle.dump(face_landmarks, f)
+        response = execute_request('MOUTH FRAMES', requests.post, 'http://127.0.0.1:5003/extract_mouth_frames', json={'root': str(WORKING_DIRECTORY)})
         if response.status_code != HTTPStatus.NO_CONTENT:
             return {'message': 'Failed to extract mouth frames'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
@@ -385,13 +401,17 @@ def web_app():
             f.write(f'{" ".join(speech_units)}\n')
 
         # run synthesis
-        run_command(f'export CUDA_VISIBLE_DEVICES="{device}"; ./synthesise.sh {LABEL_DIRECTORY} {SYNTHESIS_DIRECTORY}')
+        response = execute_request('SYNTHESIS', requests.post, 'http://127.0.0.1:5004/synthesise')
+        if response.status_code != HTTPStatus.NO_CONTENT:
+            return {'message': 'Failed to synthesise'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         # setup vocoder directory
         setup_vocoder_inference(SimpleNamespace(**{'type': TYPE, 'dataset_directory': WORKING_DIRECTORY, 'synthesis_directory': SYNTHESIS_DIRECTORY}))
 
         # run vocoder
-        run_command(f'export CUDA_VISIBLE_DEVICES="{device}"; ./vocoder.sh {SYNTHESIS_DIRECTORY.joinpath("vocoder")} {VOCODER_DIRECTORY}')
+        response = execute_request('VOCODER', requests.post, 'http://127.0.0.1:5005/vocoder')
+        if response.status_code != HTTPStatus.NO_CONTENT:
+            return {'message': 'Failed to run vocoder'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         # overlay onto video
         overlay_audio(video_raw_path, pred_audio_path, video_upload_path)
@@ -414,6 +434,11 @@ def web_app():
             'video_url': url_for('static', filename=Path(video_download_path).name),
             'asr_predictions': asr_preds
         }
+
+    # pre-load the model loading for extracting landmarks which takes a while on first run
+    get_face_landmarks(video_path='datasets/example.mp4')
+
+    print('Ready...')
 
     return app
 

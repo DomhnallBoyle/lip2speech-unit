@@ -69,9 +69,11 @@ def server(args):
 
     app = Flask(__name__)
 
+    """
     detector = dlib.get_frontal_face_detector()
     cnn_detector = dlib.cnn_face_detection_model_v1(args.cnn_detector)
     predictor = dlib.shape_predictor(args.face_predictor)
+    """
 
     @app.post('/extract_mouth_frames')
     def extract_mouth_frames():
@@ -79,6 +81,7 @@ def server(args):
         output_directory = os.path.join(input_directory, 'landmark')
         manifest_path = os.path.join(input_directory, 'test_file.list')
 
+        """
         with open(manifest_path, 'r') as f:
             fids = [ln.strip() for ln in f.readlines()]
        
@@ -96,6 +99,7 @@ def server(args):
             os.makedirs(os.path.dirname(output_fn), exist_ok=True)
             with open(output_fn, 'wb') as f:
                 pickle.dump(landmarks, f)
+        """
 
         align_mouth(SimpleNamespace(**{
             'video_direc': input_directory,
@@ -150,7 +154,7 @@ if __name__ == '__main__':
     parser_1.add_argument('--nshard', type=int, help='number of shards')
     
     parser_2 = sub_parser.add_parser('server')
-    parser_2.add_argument('--port', type=int, default=5001)
+    parser_2.add_argument('--port', type=int, default=5003)
 
     main(parser.parse_args())
     
