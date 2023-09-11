@@ -1,4 +1,5 @@
 import argparse
+import json
 import pickle
 import shutil
 import subprocess
@@ -7,7 +8,6 @@ import time
 import threading
 import uuid
 from http import HTTPStatus
-from os.path import exists
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +16,7 @@ import requests
 import soundfile as sf
 import torch
 from flask import Flask, current_app, g as app_context, redirect, request, url_for
+from jinja2 import BaseLoader, Environment
 
 from create_dataset import manifests as create_manifests, vocoder as setup_vocoder_inference
 sys.path.append('/home/domhnall/Repos/sv2s')
@@ -61,9 +62,24 @@ def execute_request(name, r, *args, **kwargs):
     return response
 
 
-def web_app():
+def web_app(args=None, args_path=None):
     setup()
 
+    if not args and not args_path:
+        print('Args required')
+        return
+
+    if args_path:
+        with open(args_path, 'r') as f:
+            args = SimpleNamespace(**json.load(f))
+
+    assert 'audio_paths' in args.__dict__
+
+    for i, audio_path in enumerate(args.audio_paths):
+        new_audio_path = STATIC_PATH.joinpath(Path(audio_path).name)
+        shutil.copyfile(audio_path, new_audio_path)
+        args.audio_paths[i] = str(new_audio_path)
+    
     app = Flask(__name__, static_folder=str(STATIC_PATH))
     app.secret_key = str(uuid.uuid4())
 
@@ -94,16 +110,21 @@ def web_app():
 
                     <div>
                         <div id="controls">
-
                             <div id="audio-selection">
-                                <h3>Audio Upload</h3>
+                                <h3>Audio Selection (for speaker characteristics)</h3>
+                                <h5>NOTE: Priority is given to an upload audio file</h5>
+                                {% for audio_path in audio_paths %}
+                                    <audio id="audio-{{ loop.index0 }}" src="{{ audio_path }}" type="audio/wav" controls></audio>
+                                    <input type="radio" value="{{ loop.index0 }}" name="checked-audio"/>
+                                    <br>
+                                {% endfor %}
                                 <input id="audio-upload" type="file"/><br>
                             </div>
 
                             <br><hr>
 
                             <div id="recorded-input">
-                                <h3>Webcam</h3>
+                                <h3>Webcam Record</h3>
                                 <video id="video" height="400" width="600" autoplay></video><br><br>
                                 <button id="start">Record</button>
                                 <button id="stop">Synthesise</button><br>
@@ -116,10 +137,9 @@ def web_app():
                                 <input id="video-upload" type="file"/><br>
                                 <button id="upload">Synthesise</button><br>
                             </div>
-
                         </div>
 
-                        <div>
+                        <div id="history-container">
                             <h3>History</h3>
                             <button id="clear">Clear All</button>
                             <div id="history"></div>
@@ -129,9 +149,12 @@ def web_app():
 
                 <style>
                     html, body {
-                        margin: 0; 
                         height: 100%; 
                         overflow: hidden
+                    }
+                    body {
+                        margin-left: 10px; 
+                        padding-left: 10px;
                     }
                     #controls {
                         width: 50%;
@@ -172,7 +195,7 @@ def web_app():
                 </style>
 
                 <script>
-                    var video, startBtn, stopBtn, uploadBtn, clearBtn, stream, recorder, globalVideoData, historyCounter = 0;
+                    var video, startBtn, stopBtn, uploadBtn, clearBtn, stream, recorder, globalVideoData, camAvailable = false, historyCounter = 0;
 
                     video = document.getElementById("video");
                     startBtn = document.getElementById("start");
@@ -200,22 +223,43 @@ def web_app():
                     .then(stm => {
                         stream = stm;
                         startBtn.removeAttribute("disabled");
+                        camAvailable = true;
                         video.srcObject = stream;
                     }).catch(e => console.error(e));
 
                     function synthesise(videoData) {
                         var audioFile = document.getElementById("audio-upload").files[0];
                         if (audioFile == null) {
-                            alert("Please select an audio file");
-                            stopBtn.textContent = "Synthesise";
-                            uploadBtn.textContent = "Synthesise";
-                            return;
+                            var checkedAudio = document.querySelector("input[name='checked-audio']:checked");
+                            if (checkedAudio != null) {
+                                var checkedAudioIndex = checkedAudio.value;
+                            
+                                var audioElement = document.getElementById("audio-" + checkedAudioIndex);
+                                var xhr = new XMLHttpRequest();
+                                xhr.open("GET", audioElement.src);
+                                xhr.responseType = "arraybuffer";
+                                xhr.onload = e => {
+                                    audioFile = new File([xhr.response], "audio.wav");
+                                    run_synthesis(videoData, audioFile);
+                                };
+                                xhr.send();
+                            } else {
+                                alert("Please select an audio file");
+                                resetDOM();
+                            }
+                        } else {
+                            run_synthesis(videoData, audioFile)
                         }
-
+                    }
+                
+                    function run_synthesis(videoData, audioFile) {
                         // create form data
                         var formData = new FormData();
                         formData.append("video", videoData);
                         formData.append("audio", audioFile);
+
+                        // measure time taken
+                        var startTime;
 
                         var xhr = new XMLHttpRequest();
                         xhr.addEventListener("load", function(event) {
@@ -236,16 +280,26 @@ def web_app():
                                     asrText += "None";
                                 }
 
-                                appendToHistory(videoURL, asrText);
+                                var timeTaken = (performance.now() - startTime) / 1000;
+                                timeTaken = Math.round(timeTaken * 100 + Number.EPSILON) / 100
+                                var timeTakenText = "<br>Time Taken: " + timeTaken + " seconds<br>";
+                                
+                                appendToHistory(videoURL, asrText, timeTakenText);
                             }
-                            startBtn.removeAttribute("disabled");
-                            stopBtn.textContent = "Synthesise";
-                            uploadBtn.removeAttribute("disabled");
-                            uploadBtn.textContent = "Synthesise";
+                            resetDOM();
                         });
                         xhr.open("POST", "/synthesise");
                         xhr.responseType = "json";
+                        startTime = performance.now();
                         xhr.send(formData);
+                    }
+
+                    function resetDOM() {
+                        if (camAvailable)
+                            startBtn.removeAttribute("disabled");
+                        stopBtn.textContent = "Synthesise";
+                        uploadBtn.removeAttribute("disabled");
+                        uploadBtn.textContent = "Synthesise";
                     }
 
                     function startRecording() {
@@ -253,7 +307,7 @@ def web_app():
                             mimeType: "video/webm"
                         });
                         recorder.start();
-                        stopBtn.removeAttribute("disabled");vocoder
+                        stopBtn.removeAttribute("disabled");
                         startBtn.disabled = true;
                         startBtn.textContent = "Recording...";
                     }
@@ -281,7 +335,7 @@ def web_app():
                         }
                     }
 
-                    function appendToHistory(videoURL, asrText) {
+                    function appendToHistory(videoURL, asrText, timeTakenText) {
                         var div = document.createElement("div");
                         var videoDiv = document.createElement("div");
                         var statsDiv = document.createElement("div");
@@ -293,6 +347,7 @@ def web_app():
                         div.innerHTML = '<br><p class="history-counter">' + ++historyCounter + ': </p><button class="remove-element-btn" onclick="removeFromHistory(this)">Remove</button><br>';
                         videoDiv.innerHTML = '<video src="' + videoURL + '" height="400" width="600" type="video/mp4" controls></video>';
                         statsDiv.innerHTML += asrText;
+                        statsDiv.innerHTML += timeTakenText;
                         div.appendChild(videoDiv);
                         div.appendChild(statsDiv);
 
@@ -323,8 +378,12 @@ def web_app():
                 </script>
             </html>
         """
+        
+        template = Environment(loader=BaseLoader).from_string(html)
 
-        return html
+        return template.render(**{
+            'audio_paths': args.audio_paths
+        })
 
     @app.post('/synthesise')
     def synthesise():
@@ -435,7 +494,7 @@ def web_app():
             'asr_predictions': asr_preds
         }
 
-    # pre-load the model loading for extracting landmarks which takes a while on first run
+    # pre-run the model loading for extracting landmarks which takes a while on first run
     get_face_landmarks(video_path='datasets/example.mp4')
 
     print('Ready...')
@@ -452,15 +511,14 @@ def setup():
 
 
 def main(args):
-    setup()
-    app = web_app()
+    app = web_app(args)
     app.run('0.0.0.0', port=args.port, debug=args.debug)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--audio_paths', type=lambda s: s.split(','), default=[])
     parser.add_argument('--port', type=int, default=5002)
     parser.add_argument('--debug', action='store_true')
 
     main(parser.parse_args())
-

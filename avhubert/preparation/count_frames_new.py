@@ -18,6 +18,7 @@ def count_frames(fids, audio_dir, video_dir):
         num_frames_audio = len(wavfile.read(wav_fn)[1])
         cap = cv2.VideoCapture(video_fn)
         num_frames_video = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
         total_num_frames.append([num_frames_audio, num_frames_video])
     return total_num_frames
 
@@ -45,8 +46,10 @@ def main(args):
         if len(sub_fids) > 0:
             fids_arr.append(sub_fids)
     if args.rank >= len(fids_arr):
-        open(f"{args.root}/nframes.audio.{args.rank}", 'w').write('')
-        open(f"{args.root}/nframes.video.{args.rank}", 'w').write('')
+        with open(f"{args.root}/nframes.audio.{args.rank}", 'w') as f:
+            f.write('')
+        with open(f"{args.root}/nframes.video.{args.rank}", 'w') as f:
+            f.write('')
     else:
         fids = fids_arr[args.rank]
         missing_fids = check(fids, audio_dir, video_dir)
@@ -74,4 +77,3 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     main(args)
-

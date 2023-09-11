@@ -1,4 +1,5 @@
 import argparse
+import pickle
 import random
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ import torch
 from tqdm import tqdm
 
 sys.path.extend(['/home/domhnall/Repos/sv2s', '/home/domhnall/Repos/fairseq'])
+from detector import get_face_landmarks
 from utils import convert_fps, crop_video, get_fps, get_video_duration, get_video_frames
 from examples.textless_nlp.gslm.unit2speech.tacotron2.layers import TacotronSTFT
 
@@ -24,6 +26,8 @@ MEL_FMAX = 8000.0
 FPS = 25
 
 stft = None
+
+# TODO: fake audio, mel-spec and speech units etc
 
 
 def trim_video_to_duration(video_path, cropped_video_path='/tmp/video_cropped.mp4'):
@@ -88,7 +92,7 @@ def init(args):
             video_path = str(video_path).replace(args.replace_path[0], args.replace_path[1])
 
         video_path = Path(video_path)
-        assert video_path.exists()
+        assert video_path.exists(), f'{video_path} does not exist'
 
         name = video_path.stem
         if args.use_unique_parent_name:
@@ -121,6 +125,12 @@ def init(args):
             speaker_embedding = np.load(args.speaker_embedding_path)
         assert speaker_embedding.shape == (256,) and speaker_embedding.dtype == np.float32
         np.save(speaker_embedding_path, speaker_embedding)
+
+        # use better detector if applicable
+        if args.use_new_landmark_detector:
+            face_landmarks = get_face_landmarks(video_path=video_path)[1]
+            with landmarks_directory.joinpath(f'{name}.pkl').open('wb') as f:
+                pickle.dump(face_landmarks, f)
 
         names.append(name)
 
@@ -219,6 +229,7 @@ if __name__ == '__main__':
 
     parser_1 = sub_parser.add_parser('init')
     parser_1.add_argument('output_directory')
+    parser_1.add_argument('--use_new_landmark_detector', action='store_true')
     parser_1.add_argument('--replace_path', type=lambda s: s.split(','))
     parser_1.add_argument('--use_unique_parent_name', action='store_true')
     parser_1.add_argument('--speaker_embedding_path')
