@@ -1,4 +1,6 @@
 import argparse
+import json
+import multiprocessing
 import pickle
 import random
 import shutil
@@ -13,7 +15,7 @@ from tqdm import tqdm
 
 sys.path.extend(['/home/domhnall/Repos/sv2s', '/home/domhnall/Repos/fairseq'])
 from detector import get_face_landmarks
-from utils import convert_fps, crop_video, get_fps, get_video_duration, get_video_frames
+from utils import convert_fps, crop_video, get_fps, get_video_duration, get_video_frames, split_list
 from examples.textless_nlp.gslm.unit2speech.tacotron2.layers import TacotronSTFT
 
 FILTER_LENGTH = 640
@@ -27,7 +29,7 @@ FPS = 25
 
 stft = None
 
-# TODO: fake audio, mel-spec and speech units etc
+# TODO: fake audio, mel-spec and speech units for testing etc
 
 
 def trim_video_to_duration(video_path, cropped_video_path='/tmp/video_cropped.mp4'):
@@ -37,6 +39,20 @@ def trim_video_to_duration(video_path, cropped_video_path='/tmp/video_cropped.mp
 
     if video_duration != get_video_duration(video_path):
         crop_video(video_path, 0, video_duration, cropped_video_path)
+        shutil.copyfile(cropped_video_path, video_path)
+
+    return num_video_frames, video_duration 
+
+
+def crop_to_random_duration(video_path, num_video_frames, video_duration, max_duration, cropped_video_path='/tmp/video_cropped.mp4'):
+    if video_duration > max_duration:
+        duration_num_frames = random.randint(1 * FPS, max_duration * FPS)
+        frame_start_index = random.randint(0, (num_video_frames - duration_num_frames) - 1)
+        frame_end_index = frame_start_index + duration_num_frames
+        start_duration = frame_start_index / FPS
+        end_duration = frame_end_index / FPS
+
+        crop_video(video_path, start_duration, end_duration, cropped_video_path)
         shutil.copyfile(cropped_video_path, video_path)
 
 
@@ -58,7 +74,84 @@ def extract_mel_spec(audio_path):
     mel = stft.mel_spectrogram(audio)[0].numpy()
     assert mel.shape[0] == NUM_MEL_CHANNELS and mel.dtype == np.float32
 
-    return mel
+    return mel.T
+
+
+def init_process(process_index, args, sample_paths, already_processed, to_process):
+    names = []
+    cropped_video_path = f'/tmp/video_cropped_{process_index}.mp4'
+    
+    for sample_path in tqdm(sample_paths):
+        if str(sample_path) in already_processed:
+            continue
+
+        if to_process and str(sample_path) not in to_process:
+            continue
+
+        # can't use original mouth frames because they were converted to 20 FPS
+        video_path, _, speaker_embedding, _ = np.load(sample_path, allow_pickle=True)['sample']
+        if args.replace_paths:
+            for k, v in args.replace_paths.items():
+                video_path = str(video_path).replace(k, v)
+
+        video_path = Path(video_path)
+        assert video_path.exists(), f'{video_path} does not exist'
+
+        name = video_path.stem
+        if args.use_unique_parent_name:
+            name = f'{video_path.parents[0].name}_{name}'
+
+        video_path = str(video_path)
+
+        # copy raw video or convert fps if necessary
+        raw_video_path = str(args.video_raw_directory.joinpath(f'{name}.mp4'))
+        if get_fps(video_path) != FPS:
+            convert_fps(video_path, FPS, raw_video_path)
+        else:
+            shutil.copyfile(video_path, raw_video_path)
+        video_path = raw_video_path
+
+        num_video_frames, video_duration = trim_video_to_duration(
+            video_path=video_path, 
+            cropped_video_path=cropped_video_path
+        )
+        if args.max_duration:
+            crop_to_random_duration(
+                video_path=video_path, 
+                num_video_frames=num_video_frames, 
+                video_duration=video_duration, 
+                max_duration=args.max_duration,
+                cropped_video_path=cropped_video_path
+            )
+
+        # extract audio
+        audio_path = str(args.audio_directory.joinpath(f'{name}.wav'))
+        extract_audio(video_path=video_path, audio_path=audio_path)
+
+        # create mel-spec
+        mel = extract_mel_spec(audio_path=audio_path)
+        mel_path = args.mel_spec_directory.joinpath(f'{name}.npy')
+        np.save(mel_path, mel)
+
+        # save speaker embedding
+        speaker_embedding_path = args.spk_emb_directory.joinpath(f'{name}.npy')
+        if args.speaker_embedding_path:
+            speaker_embedding = np.load(args.speaker_embedding_path)
+        assert speaker_embedding.shape == (256,) and speaker_embedding.dtype == np.float32
+        np.save(speaker_embedding_path, speaker_embedding)
+
+        # use better detector if applicable
+        if args.use_new_landmark_detector:
+            face_landmarks = get_face_landmarks(video_path=video_path)[1]
+            with args.landmarks_directory.joinpath(f'{name}.pkl').open('wb') as f:
+                pickle.dump(face_landmarks, f)
+
+        names.append(name)
+
+        with args.processed_path.open('a') as f:
+            f.write(f'{sample_path}\n')
+
+    return names
 
 
 def init(args):
@@ -80,59 +173,35 @@ def init(args):
     for d in [video_raw_directory, audio_directory, video_directory, mel_spec_directory, spk_emb_directory, landmarks_directory, label_directory]:
         d.mkdir(exist_ok=True, parents=True)
 
+    args.video_raw_directory = video_raw_directory
+    args.audio_directory = audio_directory
+    args.mel_spec_directory = mel_spec_directory
+    args.spk_emb_directory = spk_emb_directory
+    args.landmarks_directory = landmarks_directory
+    args.processed_path = output_directory.joinpath(f'{args.type}_processed.txt')
+
+    already_processed = set()
+    if args.processed_path.exists():
+        with args.processed_path.open('r') as f:
+            already_processed = set(f.read().splitlines())
+
     sample_paths = list(dataset_directory.glob('*.npz'))
     if args.num_samples:
         random.shuffle(sample_paths)
         sample_paths = sample_paths[:args.num_samples]
 
+    to_process = set()
+    if args.samples_path:
+        with open(args.samples_path, 'r') as f:
+            to_process = set(f.read().splitlines())
+
+    tasks = [[i, args, _sample_paths, already_processed, to_process]
+             for i, _sample_paths in enumerate(split_list(sample_paths, args.num_processes))]
     names = []
-    for sample_path in tqdm(sample_paths):
-        video_path, _, speaker_embedding, _ = np.load(sample_path, allow_pickle=True)['sample']
-        if args.replace_path:
-            video_path = str(video_path).replace(args.replace_path[0], args.replace_path[1])
-
-        video_path = Path(video_path)
-        assert video_path.exists(), f'{video_path} does not exist'
-
-        name = video_path.stem
-        if args.use_unique_parent_name:
-            name = f'{video_path.parents[0].name}_{name}'
-
-        video_path = str(video_path)
-
-        # copy raw video or convert fps if necessary
-        raw_video_path = str(video_raw_directory.joinpath(f'{name}.mp4'))
-        if get_fps(video_path) != FPS:
-            convert_fps(video_path, FPS, raw_video_path)
-        else:
-            shutil.copyfile(video_path, raw_video_path)
-        video_path = raw_video_path
-
-        trim_video_to_duration(video_path=video_path)
-
-        # extract audio
-        audio_path = str(audio_directory.joinpath(f'{name}.wav'))
-        extract_audio(video_path=video_path, audio_path=audio_path)
-
-        # create mel-spec
-        mel = extract_mel_spec(audio_path=audio_path)
-        mel_path = mel_spec_directory.joinpath(f'{name}.npy')
-        np.save(mel_path, mel)
-
-        # save speaker embedding
-        speaker_embedding_path = spk_emb_directory.joinpath(f'{name}.npy')
-        if args.speaker_embedding_path:
-            speaker_embedding = np.load(args.speaker_embedding_path)
-        assert speaker_embedding.shape == (256,) and speaker_embedding.dtype == np.float32
-        np.save(speaker_embedding_path, speaker_embedding)
-
-        # use better detector if applicable
-        if args.use_new_landmark_detector:
-            face_landmarks = get_face_landmarks(video_path=video_path)[1]
-            with landmarks_directory.joinpath(f'{name}.pkl').open('wb') as f:
-                pickle.dump(face_landmarks, f)
-
-        names.append(name)
+    with multiprocessing.Pool(processes=args.num_processes) as p:
+        results = p.starmap(init_process, tasks)
+        for _names in results:
+            names.extend(_names)
 
     # create file list
     with output_directory.joinpath(f'{args.type}_file.list').open('w') as f:
@@ -170,6 +239,9 @@ def manifests(args):
 
             f2.write(f'{_id}\t{video_path}\t{audio_path}\t{num_video_frames}\t{num_audio_frames}\n')
             f3.write(f'{audio_path}\t{num_audio_frames}\n')
+
+    if args.dict_path:
+        shutil.copyfile(args.dict_path, dataset_directory.joinpath('label'))
 
 
 def vocoder(args):
@@ -222,21 +294,25 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('type', choices=['train', 'val', 'test'])
+    parser.add_argument('type', choices=['train', 'valid', 'test'])
     parser.add_argument('dataset_directory')
 
     sub_parser = parser.add_subparsers(dest='run_type')
 
     parser_1 = sub_parser.add_parser('init')
     parser_1.add_argument('output_directory')
+    parser_1.add_argument('--num_processes', type=int, default=1)
     parser_1.add_argument('--use_new_landmark_detector', action='store_true')
-    parser_1.add_argument('--replace_path', type=lambda s: s.split(','))
+    parser_1.add_argument('--replace_paths', type=lambda s: json.loads(s))
     parser_1.add_argument('--use_unique_parent_name', action='store_true')
     parser_1.add_argument('--speaker_embedding_path')
     parser_1.add_argument('--num_samples', type=int)
+    parser_1.add_argument('--samples_path')
+    parser_1.add_argument('--max_duration', type=int)
     parser_1.add_argument('--redo', action='store_true')
 
     parser_2 = sub_parser.add_parser('manifests')
+    parser_2.add_argument('--dict_path')
 
     parser_3 = sub_parser.add_parser('vocoder')
     parser_3.add_argument('synthesis_directory')

@@ -1,11 +1,13 @@
 import argparse
 import json
+import logging
 import pickle
 import shutil
 import subprocess
 import sys
 import time
 import threading
+import traceback
 import uuid
 from http import HTTPStatus
 from pathlib import Path
@@ -15,7 +17,7 @@ import numpy as np
 import requests
 import soundfile as sf
 import torch
-from flask import Flask, current_app, g as app_context, redirect, request, url_for
+from flask import Flask, Response, g as app_context, redirect, request, url_for
 from jinja2 import BaseLoader, Environment
 
 from create_dataset import manifests as create_manifests, vocoder as setup_vocoder_inference
@@ -43,9 +45,26 @@ SYNTHESIS_DIRECTORY = WORKING_DIRECTORY.joinpath('synthesis_results')
 VOCODER_DIRECTORY = WORKING_DIRECTORY.joinpath('vocoder_results')
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-print('Using:', device)
 asr = WhisperASR(model='tiny.en', device=device)
 sem = threading.Semaphore()
+speaker_embedding_lookup = {}
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] - %(message)s',
+    handlers=[
+        logging.FileHandler('server.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logging.info(f'Using: {device}')
+
+
+def log_except_hook(*exc_info):
+    text = ''.join(traceback.format_exception(*exc_info))
+    logging.error(f'Unhandled exception: {text}') 
+
+
+sys.excepthook = log_except_hook
 
 
 def run_command(s):
@@ -54,19 +73,35 @@ def run_command(s):
 
 def execute_request(name, r, *args, **kwargs):
     start_time = time.time()
-    response = r(*args, **kwargs)
+    try:
+        response = r(*args, **kwargs)
+    except Exception as e:
+        logging.error(f'Request failed: {e}')
+        response = Response(status=HTTPStatus.INTERNAL_SERVER_ERROR)
     time_taken = round(time.time() - start_time, 2)
 
-    print(f'Request [{name}] took {time_taken} secs')
+    logging.info(f'Request [{name}] took {time_taken} secs')
     
     return response
+
+
+def _get_speaker_embedding(audio_path):
+    start_time = time.time()
+    speaker_embedding = get_speaker_embedding(audio_path=audio_path)
+    time_taken = round(time.time() - start_time, 2)
+    logging.info(f'Extracting speaker embedding took {time_taken} secs')
+
+    speaker_embedding = np.asarray(speaker_embedding, dtype=np.float32)
+    assert speaker_embedding.shape == (256,) and speaker_embedding.dtype == np.float32
+
+    return speaker_embedding
 
 
 def web_app(args=None, args_path=None):
     setup()
 
     if not args and not args_path:
-        print('Args required')
+        logging.info('Args required')
         return
 
     if args_path:
@@ -74,23 +109,41 @@ def web_app(args=None, args_path=None):
             args = SimpleNamespace(**json.load(f))
 
     assert 'audio_paths' in args.__dict__
+    args.audio_paths = [p for p in args.audio_paths if p]
+    assert len(args.audio_paths) == len(set(args.audio_paths)), f'Non-unique audio paths'
 
+    # move any audio files to static and pre-load speaker embeddings for them
     for i, audio_path in enumerate(args.audio_paths):
-        new_audio_path = STATIC_PATH.joinpath(Path(audio_path).name)
+        audio_path = Path(audio_path)
+        assert audio_path.exists(), f'{audio_path} does not exist'
+        new_audio_path = STATIC_PATH.joinpath(f'{uuid.uuid4()}.wav')
         shutil.copyfile(audio_path, new_audio_path)
         args.audio_paths[i] = str(new_audio_path)
-    
+        try:
+            speaker_embedding_lookup[new_audio_path.name] = _get_speaker_embedding(audio_path=str(new_audio_path))
+        except requests.exceptions.ConnectionError:
+            logging.info('Speaker embedding server is down...')
+            exit()
+
     app = Flask(__name__, static_folder=str(STATIC_PATH))
     app.secret_key = str(uuid.uuid4())
 
     @app.before_request
     def incoming_request():
+        # acquire lock if applicable
+        if request.endpoint == 'synthesise':
+            sem.acquire()
+
         app_context.start_time = time.time()
 
     @app.after_request
     def outgoing_response(response):
         time_taken = round(time.time() - app_context.start_time, 2)
-        current_app.logger.info('%s secs %s %s %s', time_taken, request.method, request.path, dict(request.args))
+        logging.info(f'{request.method} {request.path} {dict(request.args)} {response.status_code} - {time_taken} secs')
+
+        # release lock if applicable
+        if request.endpoint == 'synthesise':
+            sem.release()
 
         return response
 
@@ -239,7 +292,8 @@ def web_app(args=None, args_path=None):
                                 xhr.open("GET", audioElement.src);
                                 xhr.responseType = "arraybuffer";
                                 xhr.onload = e => {
-                                    audioFile = new File([xhr.response], "audio.wav");
+                                    var audioFileName = audioElement.src.replace(/^.*[\\\/]/, '');
+                                    audioFile = new File([xhr.response], audioFileName);
                                     run_synthesis(videoData, audioFile);
                                 };
                                 xhr.send();
@@ -387,9 +441,6 @@ def web_app(args=None, args_path=None):
 
     @app.post('/synthesise')
     def synthesise():
-        # acquire lock
-        sem.acquire()
-
         video_file = request.files['video']
         audio_file = request.files['audio']
 
@@ -426,16 +477,16 @@ def web_app(args=None, args_path=None):
         sf.write(audio_path, audio, SAMPLING_RATE)
 
         # extract mel spec
-        mel = np.random.rand(80, 100).astype(np.float32)
+        mel = np.random.rand(80, 100).astype(np.float32).T
         np.save(MEL_SPEC_DIRECTORY.joinpath(f'{name}.npy'), mel)
 
         # get speaker embedding
-        try:
-            speaker_embedding = get_speaker_embedding(audio_path=audio_upload_path)
-        except ConnectionError:
-            return {'message': 'Speaker embedding server not available'}, HTTPStatus.INTERNAL_SERVER_ERROR
-        speaker_embedding = np.asarray(speaker_embedding, dtype=np.float32)
-        assert speaker_embedding.shape == (256,) and speaker_embedding.dtype == np.float32
+        speaker_embedding = speaker_embedding_lookup.get(audio_file.filename)
+        if speaker_embedding is None:
+            try:
+                speaker_embedding = _get_speaker_embedding(audio_path=audio_upload_path)
+            except requests.exceptions.ConnectionError:
+                return {'message': 'Speaker embedding server not available'}, HTTPStatus.INTERNAL_SERVER_ERROR
         np.save(SPK_EMB_DIRECTORY.joinpath(f'{name}.npy'), speaker_embedding)
 
         # create file.list for extracting mouth frames
@@ -443,7 +494,10 @@ def web_app(args=None, args_path=None):
             f.write(f'{TYPE}/{name}\n')
 
         # extract mouth frames
+        start_time = time.time()
         face_landmarks = get_face_landmarks(video_path=video_raw_path)[1]
+        time_taken = round(time.time() - start_time, 2)
+        logging.info(f'Extracting face landmarks took {time_taken} secs')
         with open(video_landmarks_path, 'wb') as f:
             pickle.dump(face_landmarks, f)
         response = execute_request('MOUTH FRAMES', requests.post, 'http://127.0.0.1:5003/extract_mouth_frames', json={'root': str(WORKING_DIRECTORY)})
@@ -451,7 +505,7 @@ def web_app(args=None, args_path=None):
             return {'message': 'Failed to extract mouth frames'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         # create manifests
-        create_manifests(SimpleNamespace(**{'type': TYPE, 'dataset_directory': WORKING_DIRECTORY}))
+        create_manifests(SimpleNamespace(**{'type': TYPE, 'dataset_directory': WORKING_DIRECTORY, 'dict_path': None}))
 
         # extract speech units
         num_speech_units = int(video_duration * AUDIO_FRAME_RATE)
@@ -484,10 +538,10 @@ def web_app(args=None, args_path=None):
         )
 
         # get asr results
+        start_time = time.time()
         asr_preds = asr.run(pred_audio_path)
-
-        # release lock
-        sem.release()
+        time_taken = round(time.time() - start_time, 2)
+        logging.info(f'Whisper ASR took {time_taken} secs')
 
         return {
             'video_url': url_for('static', filename=Path(video_download_path).name),
@@ -497,7 +551,7 @@ def web_app(args=None, args_path=None):
     # pre-run the model loading for extracting landmarks which takes a while on first run
     get_face_landmarks(video_path='datasets/example.mp4')
 
-    print('Ready...')
+    logging.info('Ready for requests...')
 
     return app
 

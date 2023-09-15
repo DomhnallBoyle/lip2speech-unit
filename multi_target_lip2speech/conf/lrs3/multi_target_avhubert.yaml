@@ -61,7 +61,7 @@ optimization:
   max_update: 50000
   lr: [0.001]
   sentence_avg: true
-  update_freq: [8] #[1]
+  update_freq: [8] #[1] (for gradient accumulation)
 
 optimizer:
   _name: adam

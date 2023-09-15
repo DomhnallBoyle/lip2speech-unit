@@ -92,3 +92,4 @@ Werkzeug==2.3.7
 whisper==1.0
 gunicorn==21.2.0
 jiwer==3.0.3
+tensorboard==2.14.0
