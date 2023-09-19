@@ -1,6 +1,7 @@
 import sys,logging
 import contextlib
 from argparse import Namespace
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -8,6 +9,7 @@ from dataclasses import dataclass, field
 from fairseq import checkpoint_utils, tasks
 from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.models import FairseqEncoder, FairseqEncoderModel, register_model
+from omegaconf import MISSING
 
 DBG=True if len(sys.argv) == 1 else False
 
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MultiTargetEncoderModelConfig(AVHubertSeq2SeqConfig):
+    checkpoint_path: Optional[str] = field(default=MISSING)
     use_conformer: bool = field(default=False)
     conformer_layers: int = field(default=12)
     conformer_embed_dim: int = field(default=512)

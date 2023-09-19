@@ -7,3 +7,8 @@ datasets/*
 *checkpoints*
 *outputs*
 fairseq
+*.pem
+*.json
+*.log
+*.dat
+*.npy

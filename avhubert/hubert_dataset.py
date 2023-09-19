@@ -38,13 +38,21 @@ logger = logging.getLogger(__name__)
 
 def load_audio_visual(manifest_path, max_keep, min_keep, frame_rate, label_paths, label_rates, tol=0.1):
     def is_audio_label_aligned(audio_dur, label_durs):
+        """
+        is_aligned = []
+        for label_dur in label_durs: 
+            diff = abs(audio_dur - label_dur)
+            is_aligned.append(diff < tol or np.isclose(diff, tol))
+
+        return all(is_aligned)
+        """
+
         return all([abs(audio_dur - label_dur)<tol for label_dur in label_durs])
 
     n_long, n_short, n_unaligned = 0, 0, 0
     names, inds, sizes = [], [], []
     dur_from_label_list = []
     is_seq_label = any([x==-1 for x in label_rates])
-    print(label_paths, label_rates)
     for label_path, label_rate in zip(label_paths, label_rates):
         label_lengths = [len(line.rstrip().split())/label_rate for line in open(label_path).readlines()]
         dur_from_label_list.append(label_lengths)
@@ -63,7 +71,7 @@ def load_audio_visual(manifest_path, max_keep, min_keep, frame_rate, label_paths
                 video_dur = sz / frame_rate
                 audio_dur = dur_from_label_list[ind][0]
                 diff = abs(video_dur - audio_dur)
-                print(video_dur, audio_dur, diff, tol)
+                # print(video_dur, audio_dur, diff, tol, np.isclose(diff, tol))
                 n_unaligned += 1
             else:
                 video_path = items[1]

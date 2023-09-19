@@ -112,7 +112,12 @@ def _main(cfg, output_file):
     if output_file is not sys.stdout:  # also print to stdout
         logger.addHandler(logging.StreamHandler(sys.stdout))
 
-    arg_overrides = {'model': {'w2v_path': '/home/domhnall/Repos/lip2speech-unit/multi_target_lip2speech/checkpoints/large_vox_iter5.pt'}}
+    arg_overrides = {
+        'model': {
+            'w2v_path': '/home/domhnall/Repos/lip2speech-unit/multi_target_lip2speech/checkpoints/large_vox_iter5.pt',
+            'checkpoint_path': None
+        }
+    }
 
     use_cuda = torch.cuda.is_available()
 

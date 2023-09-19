@@ -13,6 +13,7 @@ from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import requests
 import soundfile as sf
@@ -29,6 +30,9 @@ from utils import convert_fps, convert_video_codecs, get_fps, get_speaker_embedd
 FPS = 25
 SAMPLING_RATE = 16000
 AUDIO_FRAME_RATE = 50
+MAX_HEIGHT, MAX_WIDTH = 480, 640
+MAX_GPU_DURATION = 6
+USING_GPU = torch.cuda.is_available()
 STATIC_PATH = Path('static')
 SERVER_PATH = Path('/tmp/server')
 INPUTS_PATH = SERVER_PATH.joinpath('inputs')
@@ -44,7 +48,7 @@ LABEL_DIRECTORY = WORKING_DIRECTORY.joinpath('label')
 SYNTHESIS_DIRECTORY = WORKING_DIRECTORY.joinpath('synthesis_results')
 VOCODER_DIRECTORY = WORKING_DIRECTORY.joinpath('vocoder_results')
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:0' if USING_GPU else 'cpu')
 asr = WhisperASR(model='tiny.en', device=device)
 sem = threading.Semaphore()
 speaker_embedding_lookup = {}
@@ -69,6 +73,20 @@ sys.excepthook = log_except_hook
 
 def run_command(s):
     subprocess.run(s, shell=True)
+
+
+def resize_video(video_path, width, height, output_video_path='/tmp/video_resized.mp4'):
+    run_command(f'ffmpeg -y -i {video_path} -vf scale="{width}:{height}" {output_video_path} -loglevel quiet')
+    shutil.copyfile(output_video_path, video_path)
+
+
+def get_video_size(video_path):
+    cap = cv2.VideoCapture(video_path)
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    cap.release()
+
+    return width, height
 
 
 def execute_request(name, r, *args, **kwargs):
@@ -399,7 +417,7 @@ def web_app(args=None, args_path=None):
                         statsDiv.className = "stats-div";
 
                         div.innerHTML = '<br><p class="history-counter">' + ++historyCounter + ': </p><button class="remove-element-btn" onclick="removeFromHistory(this)">Remove</button><br>';
-                        videoDiv.innerHTML = '<video src="' + videoURL + '" height="400" width="600" type="video/mp4" controls></video>';
+                        videoDiv.innerHTML = '<video src="' + videoURL + '" height="400" width="500" type="video/mp4" autoplay controls></video>';
                         statsDiv.innerHTML += asrText;
                         statsDiv.innerHTML += timeTakenText;
                         div.appendChild(videoDiv);
@@ -462,6 +480,12 @@ def web_app(args=None, args_path=None):
         for d in [WORKING_DIRECTORY, VIDEO_RAW_DIRECTORY, AUDIO_DIRECTORY, VIDEO_DIRECTORY, MEL_SPEC_DIRECTORY, SPK_EMB_DIRECTORY, LANDMARKS_DIRECTORY, LABEL_DIRECTORY]:
             d.mkdir(parents=True)
 
+        # convert size if applicable
+        if USING_GPU:
+            width, height = get_video_size(video_path=video_upload_path)
+            if width > MAX_WIDTH or height > MAX_HEIGHT:
+                resize_video(video_path=video_upload_path, width=MAX_WIDTH, height=MAX_HEIGHT)
+
         # convert fps if applicable
         if get_fps(video_path=video_upload_path) != FPS:
             convert_fps(input_video_path=video_upload_path, fps=FPS, output_video_path=video_raw_path)
@@ -470,9 +494,13 @@ def web_app(args=None, args_path=None):
 
         num_video_frames = len(get_video_frames(video_path=video_raw_path))
         video_duration = num_video_frames / FPS
-        num_audio_frames = int(video_duration * SAMPLING_RATE)
+
+        # check video duration
+        if USING_GPU and video_duration > MAX_GPU_DURATION:
+            return {'message': f'Video too long, must be <= {MAX_GPU_DURATION} seconds'}, HTTPStatus.BAD_REQUEST 
 
         # extract audio
+        num_audio_frames = int(video_duration * SAMPLING_RATE)
         audio = np.random.rand(num_audio_frames).astype(np.float32)
         sf.write(audio_path, audio, SAMPLING_RATE)
 
@@ -516,7 +544,7 @@ def web_app(args=None, args_path=None):
         # run synthesis
         response = execute_request('SYNTHESIS', requests.post, 'http://127.0.0.1:5004/synthesise')
         if response.status_code != HTTPStatus.NO_CONTENT:
-            return {'message': 'Failed to synthesise'}, HTTPStatus.INTERNAL_SERVER_ERROR
+            return {'message': 'Failed to run synthesiser'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         # setup vocoder directory
         setup_vocoder_inference(SimpleNamespace(**{'type': TYPE, 'dataset_directory': WORKING_DIRECTORY, 'synthesis_directory': SYNTHESIS_DIRECTORY}))
@@ -559,9 +587,7 @@ def web_app(args=None, args_path=None):
 def setup():
     # setup static and server directories
     for d in [INPUTS_PATH, STATIC_PATH]:
-        if d.exists():
-            shutil.rmtree(d)
-        d.mkdir(parents=True)
+        d.mkdir(parents=True, exist_ok=True)
 
 
 def main(args):

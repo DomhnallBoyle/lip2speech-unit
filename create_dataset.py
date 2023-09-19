@@ -14,6 +14,7 @@ import torch
 from tqdm import tqdm
 
 sys.path.extend(['/home/domhnall/Repos/sv2s', '/home/domhnall/Repos/fairseq'])
+from audio_utils import preprocess_audio
 from detector import get_face_landmarks
 from utils import convert_fps, crop_video, get_fps, get_video_duration, get_video_frames, split_list
 from examples.textless_nlp.gslm.unit2speech.tacotron2.layers import TacotronSTFT
@@ -29,7 +30,8 @@ FPS = 25
 
 stft = None
 
-# TODO: fake audio, mel-spec and speech units for testing etc
+# TODO: 
+#  fake audio, mel-spec and speech units for testing etc
 
 
 def trim_video_to_duration(video_path, cropped_video_path='/tmp/video_cropped.mp4'):
@@ -80,7 +82,8 @@ def extract_mel_spec(audio_path):
 def init_process(process_index, args, sample_paths, already_processed, to_process):
     names = []
     cropped_video_path = f'/tmp/video_cropped_{process_index}.mp4'
-    
+    preprocessed_audio_path = f'/tmp/preprocessed_audio_{process_index}.wav'
+
     for sample_path in tqdm(sample_paths):
         if str(sample_path) in already_processed:
             continue
@@ -127,6 +130,10 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
         # extract audio
         audio_path = str(args.audio_directory.joinpath(f'{name}.wav'))
         extract_audio(video_path=video_path, audio_path=audio_path)
+
+        if args.denoise_and_normalise:
+            preprocess_audio(audio_path=audio_path, output_path=preprocessed_audio_path)
+            shutil.copyfile(preprocessed_audio_path, audio_path)
 
         # create mel-spec
         mel = extract_mel_spec(audio_path=audio_path)
@@ -294,7 +301,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('type', choices=['train', 'valid', 'test'])
+    parser.add_argument('type', choices=['train', 'val', 'test'])
     parser.add_argument('dataset_directory')
 
     sub_parser = parser.add_subparsers(dest='run_type')
@@ -303,6 +310,7 @@ if __name__ == '__main__':
     parser_1.add_argument('output_directory')
     parser_1.add_argument('--num_processes', type=int, default=1)
     parser_1.add_argument('--use_new_landmark_detector', action='store_true')
+    parser_1.add_argument('--denoise_and_normalise', action='store_true')
     parser_1.add_argument('--replace_paths', type=lambda s: json.loads(s))
     parser_1.add_argument('--use_unique_parent_name', action='store_true')
     parser_1.add_argument('--speaker_embedding_path')

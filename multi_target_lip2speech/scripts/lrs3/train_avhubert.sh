@@ -1,5 +1,6 @@
 label_dir=$1
 output_dir=$2
+checkpoint_path=$3
 batch_size=${BATCH_SIZE:-4}  # grad-accum is 8
 
 PYTHONPATH=/home/domhnall/lip2speech-unit/fairseq \
@@ -9,6 +10,7 @@ fairseq-hydra-train \
 hydra.run.dir=$output_dir \
 common.user_dir=`pwd` \
 model.w2v_path=`pwd`/checkpoints/large_vox_iter5.pt \
+model.checkpoint_path=$checkpoint_path \
 task.label_dir=$label_dir \
 task.data=$label_dir \
 dataset.batch_size=$batch_size

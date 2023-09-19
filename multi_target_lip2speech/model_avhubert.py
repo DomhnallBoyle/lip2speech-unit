@@ -30,10 +30,21 @@ class MultiTargetAVHubertEncoderModel(FairseqEncoderModel):
         self.conformer = conformer
         self.cfg = cfg
         self.freeze_finetune_updates = cfg.freeze_finetune_updates
+        self.completed_first_forward = False
+        self.init()
+
+    def init(self):
+        checkpoint_path = self.cfg.checkpoint_path if self.cfg.checkpoint_path else None
+        if checkpoint_path:
+            state = torch.load(checkpoint_path, map_location='cpu')
+            self.load_state_dict(state['model'])
+            print('PRETRAINED MODEL LOADED')
+        self.cfg.checkpoint_path = checkpoint_path
 
     @classmethod
     def build_model(cls, cfg, task):
         """Build a new model instance."""
+        print('BUILDING MODEL')
 
         arg_overrides = {
             "dropout": cfg.dropout,
@@ -101,8 +112,11 @@ class MultiTargetAVHubertEncoderModel(FairseqEncoderModel):
 
         return cls(encoder, tgt_dict, cfg, conformer)
 
-
     def forward(self, **kwargs):
+        if self.cfg.checkpoint_path and not self.completed_first_forward:
+            assert round(self.conformer.encoder.encoders[8].conv_module.norm.weight.sum().item(), 4) == 226.4942
+            self.completed_first_forward = True
+
         ft = self.freeze_finetune_updates <= self.num_updates
         with torch.no_grad() if not ft else contextlib.ExitStack():
             output = self.encoder(**kwargs)

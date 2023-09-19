@@ -104,7 +104,12 @@ def _main(cfg, output_file):
     if output_file is not sys.stdout:  # also print to stdout
         logger.addHandler(logging.StreamHandler(sys.stdout))
 
-    arg_overrides = {'model': {'w2v_path': '/home/domhnall/Repos/lip2speech-unit/multi_target_lip2speech/checkpoints/large_vox_iter5.pt'}}
+    arg_overrides = {
+        'model': {
+            'w2v_path': '/home/domhnall/Repos/lip2speech-unit/multi_target_lip2speech/checkpoints/large_vox_iter5.pt',
+            'checkpoint_path': None  # this overrides the potential 'checkpoint_path' in the model.pt checkpoint
+        }
+    }
     
     utils.import_user_module(cfg.common)
     models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([cfg.common_eval.path], arg_overrides)
