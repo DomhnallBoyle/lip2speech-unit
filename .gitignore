@@ -12,3 +12,4 @@ fairseq
 *.log
 *.dat
 *.npy
+*.db

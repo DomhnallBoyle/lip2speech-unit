@@ -3,12 +3,14 @@ import json
 import logging
 import pickle
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
 import threading
 import traceback
 import uuid
+from datetime import datetime
 from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +22,9 @@ import soundfile as sf
 import torch
 from flask import Flask, Response, g as app_context, redirect, request, url_for
 from jinja2 import BaseLoader, Environment
+from werkzeug.datastructures import FileStorage
 
+from db import DB
 from create_dataset import manifests as create_manifests, vocoder as setup_vocoder_inference
 sys.path.append('/home/domhnall/Repos/sv2s')
 from asr import WhisperASR
@@ -33,6 +37,7 @@ AUDIO_FRAME_RATE = 50
 MAX_HEIGHT, MAX_WIDTH = 480, 640
 MAX_GPU_DURATION = 6
 USING_GPU = torch.cuda.is_available()
+DB_PATH = Path('server.db')
 STATIC_PATH = Path('static')
 SERVER_PATH = Path('/tmp/server')
 INPUTS_PATH = SERVER_PATH.joinpath('inputs')
@@ -49,7 +54,7 @@ SYNTHESIS_DIRECTORY = WORKING_DIRECTORY.joinpath('synthesis_results')
 VOCODER_DIRECTORY = WORKING_DIRECTORY.joinpath('vocoder_results')
 
 device = torch.device('cuda:0' if USING_GPU else 'cpu')
-asr = WhisperASR(model='tiny.en', device=device)
+asr = WhisperASR(model='small', device=device)
 sem = threading.Semaphore()
 speaker_embedding_lookup = {}
 logging.basicConfig(
@@ -128,13 +133,14 @@ def web_app(args=None, args_path=None):
 
     assert 'audio_paths' in args.__dict__
     args.audio_paths = [p for p in args.audio_paths if p]
+    assert len(args.audio_paths) > 0, f'Audio paths required'
     assert len(args.audio_paths) == len(set(args.audio_paths)), f'Non-unique audio paths'
 
     # move any audio files to static and pre-load speaker embeddings for them
     for i, audio_path in enumerate(args.audio_paths):
         audio_path = Path(audio_path)
         assert audio_path.exists(), f'{audio_path} does not exist'
-        new_audio_path = STATIC_PATH.joinpath(f'{uuid.uuid4()}.wav')
+        new_audio_path = STATIC_PATH.joinpath(f'speaker_audio_{i + 1}.wav')
         shutil.copyfile(audio_path, new_audio_path)
         args.audio_paths[i] = str(new_audio_path)
         try:
@@ -142,6 +148,16 @@ def web_app(args=None, args_path=None):
         except requests.exceptions.ConnectionError:
             logging.info('Speaker embedding server is down...')
             exit()
+    
+    # record the speaker audios 
+    with DB(DB_PATH) as cur:
+        for audio_path in args.audio_paths:
+            audio_id = str(uuid.uuid4())
+            try:
+                cur.execute('INSERT INTO audio VALUES (?, ?)', (audio_id, Path(audio_path).name))
+            except sqlite3.IntegrityError:
+                pass
+        cur.close()
 
     app = Flask(__name__, static_folder=str(STATIC_PATH))
     app.secret_key = str(uuid.uuid4())
@@ -183,7 +199,7 @@ def web_app(args=None, args_path=None):
                         <div id="controls">
                             <div id="audio-selection">
                                 <h3>Audio Selection (for speaker characteristics)</h3>
-                                <h5>NOTE: Priority is given to an upload audio file</h5>
+                                <h5>NOTE: Priority is given to an uploaded audio file</h5>
                                 {% for audio_path in audio_paths %}
                                     <audio id="audio-{{ loop.index0 }}" src="{{ audio_path }}" type="audio/wav" controls></audio>
                                     <input type="radio" value="{{ loop.index0 }}" name="checked-audio"/>
@@ -316,8 +332,7 @@ def web_app(args=None, args_path=None):
                                 };
                                 xhr.send();
                             } else {
-                                alert("Please select an audio file");
-                                resetDOM();
+                                run_synthesis(videoData, null);
                             }
                         } else {
                             run_synthesis(videoData, audioFile)
@@ -328,7 +343,8 @@ def web_app(args=None, args_path=None):
                         // create form data
                         var formData = new FormData();
                         formData.append("video", videoData);
-                        formData.append("audio", audioFile);
+                        if (audioFile != null)
+                            formData.append("audio", audioFile);
 
                         // measure time taken
                         var startTime;
@@ -459,9 +475,6 @@ def web_app(args=None, args_path=None):
 
     @app.post('/synthesise')
     def synthesise():
-        video_file = request.files['video']
-        audio_file = request.files['audio']
-
         name = str(uuid.uuid4())
         video_upload_path = str(INPUTS_PATH.joinpath(f'{name}.mp4'))
         audio_upload_path = str(INPUTS_PATH.joinpath(f'{name}.wav'))
@@ -471,8 +484,14 @@ def web_app(args=None, args_path=None):
         pred_audio_path = str(VOCODER_DIRECTORY.joinpath(f'pred_wav/{TYPE}/{name}.wav'))
         video_download_path = str(STATIC_PATH.joinpath(f'{name}.mp4'))
 
+        video_file = request.files['video']
         video_file.save(video_upload_path)
-        audio_file.save(audio_upload_path)
+
+        # optional audio file for speaker embedding
+        audio_file = FileStorage(filename='speaker_audio_1.wav')  # default speaker embedding
+        if 'audio' in request.files:
+            audio_file = request.files['audio']
+            audio_file.save(audio_upload_path)
 
         # setup directory
         if WORKING_DIRECTORY.exists():
@@ -570,6 +589,16 @@ def web_app(args=None, args_path=None):
         asr_preds = asr.run(pred_audio_path)
         time_taken = round(time.time() - start_time, 2)
         logging.info(f'Whisper ASR took {time_taken} secs')
+    
+        # log results in the db
+        with DB(DB_PATH) as cur:
+            usage_id = str(uuid.uuid4())
+            video_id = name
+            audio_id_row = cur.execute(f'SELECT id FROM audio WHERE name=\'{audio_file.filename}\'').fetchone()
+            audio_id = audio_id_row[0] if audio_id_row else None
+            cur.execute('INSERT INTO usage values (?, ?, ?, ?)', (usage_id, video_id, audio_id, datetime.now()))
+            cur.execute('INSERT INTO asr_transcription values (?, ?, ?)', (str(uuid.uuid4()), usage_id, asr_preds[0]))
+            cur.close()
 
         return {
             'video_url': url_for('static', filename=Path(video_download_path).name),
@@ -589,15 +618,43 @@ def setup():
     for d in [INPUTS_PATH, STATIC_PATH]:
         d.mkdir(parents=True, exist_ok=True)
 
+    # create database
+    if not DB_PATH.exists():
+        with DB(DB_PATH) as cur:
+            cur.execute('''
+                CREATE TABLE audio( 
+                    id TEXT PRIMARY KEY,
+                    name TEXT UNIQUE
+                )'''
+            )
+            cur.execute('''
+                CREATE TABLE usage(
+                    id TEXT PRIMARY KEY, 
+                    video_id TEXT, 
+                    audio_id TEXT,
+                    date TIMESTAMP,
+                    FOREIGN KEY(audio_id) REFERENCES audio(id)
+                )'''
+            )
+            cur.execute('''
+                CREATE TABLE asr_transcription(
+                    id TEXT PRIMARY KEY, 
+                    usage_id TEXT, 
+                    transcription TEXT,
+                    FOREIGN KEY(usage_id) REFERENCES usage(id)
+                )'''
+            )
+            cur.close()
+
 
 def main(args):
     app = web_app(args)
-    app.run('0.0.0.0', port=args.port, debug=args.debug)
+    app.run('0.0.0.0', port=args.port, debug=args.debug, use_reloader=False)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--audio_paths', type=lambda s: s.split(','), default=[])
+    parser.add_argument('audio_paths', type=lambda s: s.split(','))
     parser.add_argument('--port', type=int, default=5002)
     parser.add_argument('--debug', action='store_true')
 
