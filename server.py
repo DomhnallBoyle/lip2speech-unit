@@ -181,10 +181,6 @@ def web_app(args=None, args_path=None):
 
         return response
 
-    @app.get('/')
-    def index():
-        return redirect(url_for('demo'))
-
     @app.get('/demo')
     def demo():
         html = """
@@ -204,7 +200,7 @@ def web_app(args=None, args_path=None):
                                     <audio id="audio-{{ loop.index0 }}" src="{{ audio_path }}" type="audio/wav" controls></audio>
                                     <input type="radio" value="{{ loop.index0 }}" name="checked-audio"/>
                                     <br>
-                                {% endfor %}
+                                {% endfor %}<br>
                                 <input id="audio-upload" type="file"/><br>
                             </div>
 
@@ -212,7 +208,8 @@ def web_app(args=None, args_path=None):
 
                             <div id="recorded-input">
                                 <h3>Webcam Record</h3>
-                                <video id="video" height="400" width="600" autoplay></video><br><br>
+                                Video Source: <select id="video-source"></select><br><br>
+                                <video id="video" height="400" width="600" autoplay muted playsinline></video><br><br>
                                 <button id="start">Record</button>
                                 <button id="stop">Synthesise</button><br>
                             </div>
@@ -282,37 +279,105 @@ def web_app(args=None, args_path=None):
                 </style>
 
                 <script>
-                    var video, startBtn, stopBtn, uploadBtn, clearBtn, stream, recorder, globalVideoData, camAvailable = false, historyCounter = 0;
+                    "use strict";
+
+                    var video, videoSelect, startBtn, stopBtn, uploadBtn, clearBtn, camAvailable = false, historyCounter = 0;
+                    var chunks = [];
 
                     video = document.getElementById("video");
+                    videoSelect = document.getElementById("video-source");
                     startBtn = document.getElementById("start");
                     stopBtn = document.getElementById("stop");
                     uploadBtn = document.getElementById("upload");
                     clearBtn = document.getElementById("clear");
 
-                    startBtn.onclick = startRecording;
-                    stopBtn.onclick = stopRecording;
+                    videoSelect.onchange = getStream;
                     uploadBtn.onclick = uploadVideo;
                     clearBtn.onclick = clearHistory;
                     startBtn.disabled = true;
                     stopBtn.disabled = true;
 
-                    navigator.mediaDevices.getUserMedia({
-                        video: {
-                            frameRate: {
-                                ideal: 20,
-                                min: 20,
-                                max: 30
+                    getStream().then(getDevices).then(gotDevices);
+
+                    function assert(x, y, msg) {
+                        if (x !== y)
+                            alert(msg);
+                    }
+
+                    function getDevices() {
+                        return navigator.mediaDevices.enumerateDevices();
+                    }
+
+                    function gotDevices(deviceInfos) {
+                        window.deviceInfos = deviceInfos;
+                        console.log("Available devices: ", deviceInfos);
+                        for (const deviceInfo of deviceInfos) {
+                            const option = document.createElement("option");
+                            option.value = deviceInfo.deviceId;
+                            if (deviceInfo.kind === "videoinput") {
+                                option.text = deviceInfo.label || "Camera ${videoSelect.length + 1}";
+                                videoSelect.appendChild(option);
                             }
-                        },
-                        audio: true
-                    })
-                    .then(stm => {
-                        stream = stm;
+                        }
+                    }
+
+                    function getStream() {
+                        if (window.stream) {
+                            window.stream.getTracks().forEach(track => {
+                                track.stop();
+                            });
+                        }
+                        const videoSource = videoSelect.value;
+                        const constraints = {
+                            video: {
+                                deviceId: videoSource ? {exact: videoSource} : undefined,
+                                frameRate: {
+                                    ideal: 25,
+                                    min: 20,
+                                    max: 30
+                                }
+                            }
+                        };
+                        return navigator.mediaDevices.getUserMedia(constraints).then(gotStream).catch(handleError);
+                    }
+
+                    function gotStream(stream) {
+                        window.stream = stream;
+                        videoSelect.selectedIndex = [...videoSelect.options].findIndex(option => option.text === stream.getVideoTracks()[0].label);
                         startBtn.removeAttribute("disabled");
                         camAvailable = true;
                         video.srcObject = stream;
-                    }).catch(e => console.error(e));
+                     
+                        const recorder = new MediaRecorder(stream);
+
+                        startBtn.onclick = function() {
+                            recorder.start();
+                            stopBtn.removeAttribute("disabled");
+                            startBtn.disabled = true;
+                            startBtn.textContent = "Recording...";
+                        };
+                        stopBtn.onclick = function() {
+                            recorder.stop();
+                        };
+
+                        recorder.onstop = function(e) {
+                            startBtn.textContent = "Record";
+                            stopBtn.disabled = true;
+                            stopBtn.textContent = "Please Wait...";
+                            const blob = new Blob(chunks, {type: "video/webm"});
+                            synthesise(blob);
+                            chunks = [];
+                        };
+
+                        recorder.ondataavailable = function(e) {
+                            if (e.data.size > 0)
+                                chunks.push(e.data);
+                        };
+                    }
+
+                    function handleError(error) {
+                        console.error("Error: ", error);
+                    }
 
                     function synthesise(videoData) {
                         var audioFile = document.getElementById("audio-upload").files[0];
@@ -361,7 +426,7 @@ def web_app(args=None, args_path=None):
 
                                 var asrText = "Whisper ASR Predictions:<br>";                      
                                 if (asrPredictions.length > 0) {
-                                    for (i = 0; i < asrPredictions.length; i++) {
+                                    for (var i = 0; i < asrPredictions.length; i++) {
                                         asrText += (i+1) + ": " + asrPredictions[i] + "<br>";
                                     }
                                 } else {
@@ -371,7 +436,7 @@ def web_app(args=None, args_path=None):
                                 var timeTaken = (performance.now() - startTime) / 1000;
                                 timeTaken = Math.round(timeTaken * 100 + Number.EPSILON) / 100
                                 var timeTakenText = "<br>Time Taken: " + timeTaken + " seconds<br>";
-                                
+
                                 appendToHistory(videoURL, asrText, timeTakenText);
                             }
                             resetDOM();
@@ -390,27 +455,6 @@ def web_app(args=None, args_path=None):
                         uploadBtn.textContent = "Synthesise";
                     }
 
-                    function startRecording() {
-                        recorder = new MediaRecorder(stream, {
-                            mimeType: "video/webm"
-                        });
-                        recorder.start();
-                        stopBtn.removeAttribute("disabled");
-                        startBtn.disabled = true;
-                        startBtn.textContent = "Recording...";
-                    }
-
-                    function stopRecording() {
-                        recorder.ondataavailable = e => {
-                            startBtn.textContent = "Record";
-                            stopBtn.disabled = true;
-                            stopBtn.textContent = "Please Wait...";                   
-                            synthesise(e.data);
-                            globalVideoData = e.data;
-                        };
-                        recorder.stop();
-                    }
-
                     function uploadVideo() {
                         var videoFile = document.getElementById("video-upload").files[0];
                         if (videoFile == null) {
@@ -419,7 +463,6 @@ def web_app(args=None, args_path=None):
                             uploadBtn.disabled = true;
                             uploadBtn.textContent = "Please Wait...";
                             synthesise(videoFile);
-                            globalVideoData = videoFile;
                         }
                     }
 
@@ -545,6 +588,8 @@ def web_app(args=None, args_path=None):
         face_landmarks = get_face_landmarks(video_path=video_raw_path)[1]
         time_taken = round(time.time() - start_time, 2)
         logging.info(f'Extracting face landmarks took {time_taken} secs')
+        if any([l is None for l in face_landmarks]):
+            return {'message': 'Failed to detect face landmarks'}, HTTPStatus.BAD_REQUEST
         with open(video_landmarks_path, 'wb') as f:
             pickle.dump(face_landmarks, f)
         response = execute_request('MOUTH FRAMES', requests.post, 'http://127.0.0.1:5003/extract_mouth_frames', json={'root': str(WORKING_DIRECTORY)})
@@ -596,8 +641,9 @@ def web_app(args=None, args_path=None):
             video_id = name
             audio_id_row = cur.execute(f'SELECT id FROM audio WHERE name=\'{audio_file.filename}\'').fetchone()
             audio_id = audio_id_row[0] if audio_id_row else None
+            asr_pred = asr_preds[0] if len(asr_preds) >= 1 else ''
             cur.execute('INSERT INTO usage values (?, ?, ?, ?)', (usage_id, video_id, audio_id, datetime.now()))
-            cur.execute('INSERT INTO asr_transcription values (?, ?, ?)', (str(uuid.uuid4()), usage_id, asr_preds[0]))
+            cur.execute('INSERT INTO asr_transcription values (?, ?, ?)', (str(uuid.uuid4()), usage_id, asr_pred))
             cur.close()
 
         return {
