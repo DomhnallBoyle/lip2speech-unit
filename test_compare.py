@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 sys.path.append('/home/domhnall/Repos/sv2s')
 from asr import WhisperASR
+from audio_utils import preprocess_audio
 from utils import get_viseme_distance, get_words_to_visemes_d, load_groundtruth_data
 
 
@@ -17,6 +18,13 @@ def main(args):
 
     l2s_directory = Path(args.l2s_directory)
     sv2s_directory = Path(args.sv2s_directory)
+
+    output_d_name = 'pred_asr'
+    if args.denoise_and_normalise:
+        output_d_name += '_denoised_and_normalised'
+
+    l2s_preds_directory = l2s_directory.joinpath(output_d_name)
+    l2s_preds_directory.mkdir(exist_ok=True)
 
     asr = WhisperASR(model='medium', device=device)
     gt_df = load_groundtruth_data(args.groundtruth_path)[0]
@@ -28,11 +36,31 @@ def main(args):
     l2s_vdists, sv2s_vdists = [], []
 
     for l2s_audio_path in tqdm(l2s_audio_paths): 
-        l2s_preds = asr.run(str(l2s_audio_path))
-        if not l2s_preds: 
-            continue
-
         name = l2s_audio_path.stem
+        l2s_audio_path = str(l2s_audio_path)
+
+        l2s_preds_path = l2s_preds_directory.joinpath(f'{name}_whisper_asr_results.txt')
+        if l2s_preds_path.exists():
+            with l2s_preds_path.open('r') as f:
+                l2s_preds = f.read().splitlines()
+        else:
+            if args.denoise_and_normalise:
+                new_audio_path = '/tmp/preprocessed_audio.wav'
+                preprocess_audio(
+                    audio_path=l2s_audio_path, 
+                    output_path=new_audio_path, 
+                    sr=16000
+                )
+                l2s_audio_path = new_audio_path
+
+            l2s_preds = asr.run(l2s_audio_path)
+            if not l2s_preds: 
+                continue
+        
+            with l2s_preds_path.open('w') as f:
+                for pred in l2s_preds:
+                    f.write(f'{pred}\n')
+
         sv2s_preds_path = sv2s_directory.joinpath(f'{name}/Whisper_asr_results.txt')
         if not sv2s_preds_path.exists():
             continue
@@ -68,5 +96,6 @@ if __name__ == '__main__':
     parser.add_argument('l2s_directory')
     parser.add_argument('sv2s_directory')
     parser.add_argument('groundtruth_path')
+    parser.add_argument('--denoise_and_normalise', action='store_true')
 
     main(parser.parse_args())

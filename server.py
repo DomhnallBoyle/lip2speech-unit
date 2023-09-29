@@ -20,14 +20,14 @@ import numpy as np
 import requests
 import soundfile as sf
 import torch
-from flask import Flask, Response, g as app_context, redirect, request, url_for
-from jinja2 import BaseLoader, Environment
+from flask import Flask, Response, g as app_context, render_template, request, url_for
 from werkzeug.datastructures import FileStorage
 
 from db import DB
 from create_dataset import manifests as create_manifests, vocoder as setup_vocoder_inference
 sys.path.append('/home/domhnall/Repos/sv2s')
 from asr import WhisperASR
+from audio_utils import preprocess_audio as post_process_audio
 from detector import get_face_landmarks
 from utils import convert_fps, convert_video_codecs, get_fps, get_speaker_embedding, get_video_frames, overlay_audio
 
@@ -42,6 +42,7 @@ STATIC_PATH = Path('static')
 SERVER_PATH = Path('/tmp/server')
 INPUTS_PATH = SERVER_PATH.joinpath('inputs')
 WORKING_DIRECTORY = Path('/tmp/lip2speech')
+POST_PROCESSED_AUDIO_PATH = Path('/tmp/post_processed_audio.wav')
 TYPE = 'test'
 VIDEO_RAW_DIRECTORY = WORKING_DIRECTORY.joinpath(f'{TYPE}')
 AUDIO_DIRECTORY = WORKING_DIRECTORY.joinpath(f'audio/{TYPE}')
@@ -121,8 +122,6 @@ def _get_speaker_embedding(audio_path):
 
 
 def web_app(args=None, args_path=None):
-    setup()
-
     if not args and not args_path:
         logging.info('Args required')
         return
@@ -130,6 +129,14 @@ def web_app(args=None, args_path=None):
     if args_path:
         with open(args_path, 'r') as f:
             args = SimpleNamespace(**json.load(f))
+
+    # setup static and server directories
+    for d in [INPUTS_PATH, STATIC_PATH]:
+        d.mkdir(parents=True, exist_ok=True)
+
+    if not DB_PATH.exists():
+        logging.info('Database does not exist, run migrations...')
+        return
 
     assert 'audio_paths' in args.__dict__
     args.audio_paths = [p for p in args.audio_paths if p]
@@ -146,18 +153,29 @@ def web_app(args=None, args_path=None):
         try:
             speaker_embedding_lookup[new_audio_path.name] = _get_speaker_embedding(audio_path=str(new_audio_path))
         except requests.exceptions.ConnectionError:
-            logging.info('Speaker embedding server is down...')
-            exit()
+            logging.warning('Speaker embedding server is down...')
     
-    # record the speaker audios 
+    # get synthesiser checkpoints
+    response = execute_request('GET CHECKPOINTS', requests.get, 'http://127.0.0.1:5004/checkpoints')
+    if response.status_code != HTTPStatus.OK:
+        logging.warning('Synthesiser is down...')
+        checkpoint_ids = []
+    else:
+        checkpoint_ids = response.json()
+
+    # record the models and speaker audios
     with DB(DB_PATH) as cur:
-        for audio_path in args.audio_paths:
-            audio_id = str(uuid.uuid4())
+        for checkpoint_id in checkpoint_ids:
             try:
-                cur.execute('INSERT INTO audio VALUES (?, ?)', (audio_id, Path(audio_path).name))
+                cur.execute('INSERT INTO model (id, name) VALUES (?, ?)', (str(uuid.uuid4()), checkpoint_id))
             except sqlite3.IntegrityError:
                 pass
-        cur.close()
+
+        for audio_path in args.audio_paths:
+            try:
+                cur.execute('INSERT INTO audio (id, name) VALUES (?, ?)', (str(uuid.uuid4()), Path(audio_path).name))
+            except sqlite3.IntegrityError:
+                pass
 
     app = Flask(__name__, static_folder=str(STATIC_PATH))
     app.secret_key = str(uuid.uuid4())
@@ -183,337 +201,9 @@ def web_app(args=None, args_path=None):
 
     @app.get('/demo')
     def demo():
-        html = """
-            <!DOCTYPE html>
-                <head>
-                    <title>VSG Demo</title>
-                </head>
-                <body>
-                    <h2><u>Visual Speech Synthesis:</u></h2>
-
-                    <div>
-                        <div id="controls">
-                            <div id="audio-selection">
-                                <h3>Audio Selection (for speaker characteristics)</h3>
-                                <h5>NOTE: Priority is given to an uploaded audio file</h5>
-                                {% for audio_path in audio_paths %}
-                                    <audio id="audio-{{ loop.index0 }}" src="{{ audio_path }}" type="audio/wav" controls></audio>
-                                    <input type="radio" value="{{ loop.index0 }}" name="checked-audio"/>
-                                    <br>
-                                {% endfor %}<br>
-                                <input id="audio-upload" type="file"/><br>
-                            </div>
-
-                            <br><hr>
-
-                            <div id="recorded-input">
-                                <h3>Webcam Record</h3>
-                                Video Source: <select id="video-source"></select><br><br>
-                                <video id="video" height="400" width="600" autoplay muted playsinline></video><br><br>
-                                <button id="start">Record</button>
-                                <button id="stop">Synthesise</button><br>
-                            </div>
-
-                            <br><hr>
-
-                            <div id="uploaded-input">
-                                <h3>Video Upload</h3>
-                                <input id="video-upload" type="file"/><br>
-                                <button id="upload">Synthesise</button><br>
-                            </div>
-                        </div>
-
-                        <div id="history-container">
-                            <h3>History</h3>
-                            <button id="clear">Clear All</button>
-                            <div id="history"></div>
-                        </div>
-                    </div>
-                </body>
-
-                <style>
-                    html, body {
-                        height: 100%; 
-                        overflow: hidden
-                    }
-                    body {
-                        margin-left: 10px; 
-                        padding-left: 10px;
-                    }
-                    #controls {
-                        width: 50%;
-                        float: left;
-                        overflow: auto;
-                        max-height: 80vh;
-                    }
-                    #history {
-                        width: 50%;
-                        float: right;
-                        overflow: auto;
-                        max-height: 80vh;
-                    }
-                    .history-element {
-                        height: 425px;
-                    }
-                    .video-div {
-                        width: 60%;
-                        float: left;
-                        height: 100%;
-                    }
-                    .stats-div {
-                        width: 40%;
-                        float: right;
-                        height: 100%;
-                    }
-                    #controls hr {
-                        width: 75%;
-                        margin-left: 0;
-                    }
-                    fieldset {
-                        min-width: auto;
-                        display: inline;
-                    }
-                    .history-element .history-counter {
-                        display: inline;
-                    }
-                </style>
-
-                <script>
-                    "use strict";
-
-                    var video, videoSelect, startBtn, stopBtn, uploadBtn, clearBtn, camAvailable = false, historyCounter = 0;
-                    var chunks = [];
-
-                    video = document.getElementById("video");
-                    videoSelect = document.getElementById("video-source");
-                    startBtn = document.getElementById("start");
-                    stopBtn = document.getElementById("stop");
-                    uploadBtn = document.getElementById("upload");
-                    clearBtn = document.getElementById("clear");
-
-                    videoSelect.onchange = getStream;
-                    uploadBtn.onclick = uploadVideo;
-                    clearBtn.onclick = clearHistory;
-                    startBtn.disabled = true;
-                    stopBtn.disabled = true;
-
-                    getStream().then(getDevices).then(gotDevices);
-
-                    function assert(x, y, msg) {
-                        if (x !== y)
-                            alert(msg);
-                    }
-
-                    function getDevices() {
-                        return navigator.mediaDevices.enumerateDevices();
-                    }
-
-                    function gotDevices(deviceInfos) {
-                        window.deviceInfos = deviceInfos;
-                        console.log("Available devices: ", deviceInfos);
-                        for (const deviceInfo of deviceInfos) {
-                            const option = document.createElement("option");
-                            option.value = deviceInfo.deviceId;
-                            if (deviceInfo.kind === "videoinput") {
-                                option.text = deviceInfo.label || "Camera ${videoSelect.length + 1}";
-                                videoSelect.appendChild(option);
-                            }
-                        }
-                    }
-
-                    function getStream() {
-                        if (window.stream) {
-                            window.stream.getTracks().forEach(track => {
-                                track.stop();
-                            });
-                        }
-                        const videoSource = videoSelect.value;
-                        const constraints = {
-                            video: {
-                                deviceId: videoSource ? {exact: videoSource} : undefined,
-                                frameRate: {
-                                    ideal: 25,
-                                    min: 20,
-                                    max: 30
-                                }
-                            }
-                        };
-                        return navigator.mediaDevices.getUserMedia(constraints).then(gotStream).catch(handleError);
-                    }
-
-                    function gotStream(stream) {
-                        window.stream = stream;
-                        videoSelect.selectedIndex = [...videoSelect.options].findIndex(option => option.text === stream.getVideoTracks()[0].label);
-                        startBtn.removeAttribute("disabled");
-                        camAvailable = true;
-                        video.srcObject = stream;
-                     
-                        const recorder = new MediaRecorder(stream);
-
-                        startBtn.onclick = function() {
-                            recorder.start();
-                            stopBtn.removeAttribute("disabled");
-                            startBtn.disabled = true;
-                            startBtn.textContent = "Recording...";
-                        };
-                        stopBtn.onclick = function() {
-                            recorder.stop();
-                        };
-
-                        recorder.onstop = function(e) {
-                            startBtn.textContent = "Record";
-                            stopBtn.disabled = true;
-                            stopBtn.textContent = "Please Wait...";
-                            const blob = new Blob(chunks, {type: "video/webm"});
-                            synthesise(blob);
-                            chunks = [];
-                        };
-
-                        recorder.ondataavailable = function(e) {
-                            if (e.data.size > 0)
-                                chunks.push(e.data);
-                        };
-                    }
-
-                    function handleError(error) {
-                        console.error("Error: ", error);
-                    }
-
-                    function synthesise(videoData) {
-                        var audioFile = document.getElementById("audio-upload").files[0];
-                        if (audioFile == null) {
-                            var checkedAudio = document.querySelector("input[name='checked-audio']:checked");
-                            if (checkedAudio != null) {
-                                var checkedAudioIndex = checkedAudio.value;
-                            
-                                var audioElement = document.getElementById("audio-" + checkedAudioIndex);
-                                var xhr = new XMLHttpRequest();
-                                xhr.open("GET", audioElement.src);
-                                xhr.responseType = "arraybuffer";
-                                xhr.onload = e => {
-                                    var audioFileName = audioElement.src.replace(/^.*[\\\/]/, '');
-                                    audioFile = new File([xhr.response], audioFileName);
-                                    run_synthesis(videoData, audioFile);
-                                };
-                                xhr.send();
-                            } else {
-                                run_synthesis(videoData, null);
-                            }
-                        } else {
-                            run_synthesis(videoData, audioFile)
-                        }
-                    }
-                
-                    function run_synthesis(videoData, audioFile) {
-                        // create form data
-                        var formData = new FormData();
-                        formData.append("video", videoData);
-                        if (audioFile != null)
-                            formData.append("audio", audioFile);
-
-                        // measure time taken
-                        var startTime;
-
-                        var xhr = new XMLHttpRequest();
-                        xhr.addEventListener("load", function(event) {
-                            var jsonResponse = xhr.response;
-                            if (xhr.status != 200) {
-                                alert(jsonResponse["message"]);
-                            } else {
-                                var jsonResponse = xhr.response;
-                                var videoURL = jsonResponse["video_url"];
-                                var asrPredictions = jsonResponse["asr_predictions"];
-
-                                var asrText = "Whisper ASR Predictions:<br>";                      
-                                if (asrPredictions.length > 0) {
-                                    for (var i = 0; i < asrPredictions.length; i++) {
-                                        asrText += (i+1) + ": " + asrPredictions[i] + "<br>";
-                                    }
-                                } else {
-                                    asrText += "None";
-                                }
-
-                                var timeTaken = (performance.now() - startTime) / 1000;
-                                timeTaken = Math.round(timeTaken * 100 + Number.EPSILON) / 100
-                                var timeTakenText = "<br>Time Taken: " + timeTaken + " seconds<br>";
-
-                                appendToHistory(videoURL, asrText, timeTakenText);
-                            }
-                            resetDOM();
-                        });
-                        xhr.open("POST", "/synthesise");
-                        xhr.responseType = "json";
-                        startTime = performance.now();
-                        xhr.send(formData);
-                    }
-
-                    function resetDOM() {
-                        if (camAvailable)
-                            startBtn.removeAttribute("disabled");
-                        stopBtn.textContent = "Synthesise";
-                        uploadBtn.removeAttribute("disabled");
-                        uploadBtn.textContent = "Synthesise";
-                    }
-
-                    function uploadVideo() {
-                        var videoFile = document.getElementById("video-upload").files[0];
-                        if (videoFile == null) {
-                            alert("Please select a video file");
-                        } else {
-                            uploadBtn.disabled = true;
-                            uploadBtn.textContent = "Please Wait...";
-                            synthesise(videoFile);
-                        }
-                    }
-
-                    function appendToHistory(videoURL, asrText, timeTakenText) {
-                        var div = document.createElement("div");
-                        var videoDiv = document.createElement("div");
-                        var statsDiv = document.createElement("div");
-
-                        div.className = "history-element";
-                        videoDiv.className = "video-div";
-                        statsDiv.className = "stats-div";
-
-                        div.innerHTML = '<br><p class="history-counter">' + ++historyCounter + ': </p><button class="remove-element-btn" onclick="removeFromHistory(this)">Remove</button><br>';
-                        videoDiv.innerHTML = '<video src="' + videoURL + '" height="400" width="500" type="video/mp4" autoplay controls></video>';
-                        statsDiv.innerHTML += asrText;
-                        statsDiv.innerHTML += timeTakenText;
-                        div.appendChild(videoDiv);
-                        div.appendChild(statsDiv);
-
-                        document.getElementById("history").appendChild(div);
-                        div.scrollIntoView();
-                    }
-
-                    function removeFromHistory(button) {
-                        // get containing div
-                        var parentDiv = button.parentNode;
-                        parentDiv.remove();
-
-                        // reset counter of history elements
-                        historyCounter = 0;
-                        var historyDiv = document.getElementById("history");
-                        var historyElements = historyDiv.childNodes;
-                        for (var i = 0; i < historyElements.length; i++) {
-                            var historyElement = historyElements[i];
-                            historyElement.getElementsByClassName("history-counter")[0].innerText = ++historyCounter + ": ";
-                        }
-                    }
-
-                    function clearHistory() {
-                        document.getElementById("history").innerHTML = "";
-                        historyCounter = 0;
-                    }
-
-                </script>
-            </html>
-        """
-        
-        template = Environment(loader=BaseLoader).from_string(html)
-
-        return template.render(**{
-            'audio_paths': args.audio_paths
+        return render_template('index.html', **{
+            'audio_paths': args.audio_paths,
+            'checkpoint_ids': checkpoint_ids
         })
 
     @app.post('/synthesise')
@@ -529,6 +219,12 @@ def web_app(args=None, args_path=None):
 
         video_file = request.files['video']
         video_file.save(video_upload_path)
+
+        # optional model checkpoint id
+        checkpoint_id = request.form.get('checkpoint_id', 'base')
+        response = execute_request('LOAD CHECKPOINT', requests.post, 'http://127.0.0.1:5004/load_checkpoint', json={'checkpoint_id': checkpoint_id})
+        if response.status_code != HTTPStatus.NO_CONTENT:
+            return {'message': 'Failed to load checkpoint'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         # optional audio file for speaker embedding
         audio_file = FileStorage(filename='speaker_audio_1.wav')  # default speaker embedding
@@ -618,6 +314,14 @@ def web_app(args=None, args_path=None):
         if response.status_code != HTTPStatus.NO_CONTENT:
             return {'message': 'Failed to run vocoder'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
+        # post-processing audio - denoise and normalise
+        post_process_audio(
+            audio_path=pred_audio_path,
+            output_path=str(POST_PROCESSED_AUDIO_PATH),
+            sr=SAMPLING_RATE
+        )
+        pred_audio_path = str(POST_PROCESSED_AUDIO_PATH)
+
         # overlay onto video
         overlay_audio(video_raw_path, pred_audio_path, video_upload_path)
 
@@ -638,13 +342,18 @@ def web_app(args=None, args_path=None):
         # log results in the db
         with DB(DB_PATH) as cur:
             usage_id = str(uuid.uuid4())
+
             video_id = name
+
+            model_id = cur.execute(f'SELECT id FROM model WHERE name=\'{checkpoint_id}\'').fetchone()[0]
+
             audio_id_row = cur.execute(f'SELECT id FROM audio WHERE name=\'{audio_file.filename}\'').fetchone()
             audio_id = audio_id_row[0] if audio_id_row else None
+
             asr_pred = asr_preds[0] if len(asr_preds) >= 1 else ''
-            cur.execute('INSERT INTO usage values (?, ?, ?, ?)', (usage_id, video_id, audio_id, datetime.now()))
-            cur.execute('INSERT INTO asr_transcription values (?, ?, ?)', (str(uuid.uuid4()), usage_id, asr_pred))
-            cur.close()
+
+            cur.execute('INSERT INTO usage (id, model_id, video_id, audio_id, date) values (?, ?, ?, ?, ?)', (usage_id, model_id, video_id, audio_id, datetime.now()))
+            cur.execute('INSERT INTO asr_transcription (id, usage_id, transcription) values (?, ?, ?)', (str(uuid.uuid4()), usage_id, asr_pred))
 
         return {
             'video_url': url_for('static', filename=Path(video_download_path).name),
@@ -657,40 +366,6 @@ def web_app(args=None, args_path=None):
     logging.info('Ready for requests...')
 
     return app
-
-
-def setup():
-    # setup static and server directories
-    for d in [INPUTS_PATH, STATIC_PATH]:
-        d.mkdir(parents=True, exist_ok=True)
-
-    # create database
-    if not DB_PATH.exists():
-        with DB(DB_PATH) as cur:
-            cur.execute('''
-                CREATE TABLE audio( 
-                    id TEXT PRIMARY KEY,
-                    name TEXT UNIQUE
-                )'''
-            )
-            cur.execute('''
-                CREATE TABLE usage(
-                    id TEXT PRIMARY KEY, 
-                    video_id TEXT, 
-                    audio_id TEXT,
-                    date TIMESTAMP,
-                    FOREIGN KEY(audio_id) REFERENCES audio(id)
-                )'''
-            )
-            cur.execute('''
-                CREATE TABLE asr_transcription(
-                    id TEXT PRIMARY KEY, 
-                    usage_id TEXT, 
-                    transcription TEXT,
-                    FOREIGN KEY(usage_id) REFERENCES usage(id)
-                )'''
-            )
-            cur.close()
 
 
 def main(args):

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from itertools import chain
+import gc
 import logging
 import os
 import sys
@@ -43,6 +44,9 @@ logger = logging.getLogger(__name__)
 
 config_path = Path(__file__).resolve().parent / "conf"
 
+models_d, models, saved_cfg, task, dictionary, lms, loaded_checkpoint_id = None, None, None, None, None, None, 'base'
+
+
 @dataclass
 class OverrideConfig(FairseqDataclass):
     noise_wav: Optional[str] = field(default=None, metadata={'help': 'noise wav file'})
@@ -51,6 +55,8 @@ class OverrideConfig(FairseqDataclass):
     modalities: List[str] = field(default_factory=lambda: [""], metadata={'help': 'which modality to use'})
     data: Optional[str] = field(default=None, metadata={'help': 'path to test data directory'})
     label_dir: Optional[str] = field(default=None, metadata={'help': 'path to test label directory'})
+    checkpoints_data_path: str = field(default="")
+
 
 @dataclass
 class InferConfig(FairseqDataclass):
@@ -96,34 +102,20 @@ def get_symbols_to_strip_from_output(generator):
         return {generator.eos, generator.pad}
 
 
-def _main(cfg, output_file):
-    from http import HTTPStatus
-    from flask import Flask
+def load_checkpoints(checkpoint_paths_d, arg_overrides):
+    global models_d, saved_cfg, task
 
-    app = Flask(__name__)
+    names, checkpoint_paths = zip(*checkpoint_paths_d.items())
 
-    logging.basicConfig(
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        level=os.environ.get("LOGLEVEL", "INFO").upper(),
-        stream=output_file,
-    )
-    logger = logging.getLogger("hybrid.speech_recognize")
-    if output_file is not sys.stdout:  # also print to stdout
-        logger.addHandler(logging.StreamHandler(sys.stdout))
+    for checkpoint_path in checkpoint_paths:
+        assert os.path.exists(checkpoint_path), f'{checkpoint_path} does not exist'
 
-    arg_overrides = {
-        'model': {
-            'w2v_path': '/home/domhnall/Repos/lip2speech-unit/multi_target_lip2speech/checkpoints/large_vox_iter5.pt',
-            'checkpoint_path': None
-        }
-    }
+    models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task(checkpoint_paths, arg_overrides)
+    models_d = {name: model for name, model in zip(names, models)}
 
-    use_cuda = torch.cuda.is_available()
 
-    utils.import_user_module(cfg.common)
-    models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task([cfg.common_eval.path], arg_overrides)
-    models =  [model.eval().cuda() if use_cuda else model.eval() for model in models]
+def setup_config_and_task(cfg):
+    global saved_cfg, task, dictionary, lms
 
     saved_cfg.task.modalities = cfg.override.modalities
     task = tasks.setup_task(saved_cfg.task)
@@ -150,19 +142,71 @@ def _main(cfg, output_file):
     if cfg.override.label_dir is not None:
         task.cfg.label_dir = cfg.override.label_dir
 
+    cfg.dataset.batch_size = 1
+
     lms = [None]
 
-    # Optimize ensemble for generation
+
+def switch_model(checkpoint_id, cfg, use_cuda):
+    global models
+
+    logger.info(f'SWITCHING MODEL: {checkpoint_id}')
+
+    # release the previous model
+    if models is not None:
+        models[0] = models[0].cpu()
+        del models[0]
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    models = [models_d[checkpoint_id]]
+
+    # optimise ensemble for generation
     for model in chain(models, lms):
         if model is None:
             continue
         if cfg.common.fp16:
             model.half()
+        model.eval()
         if use_cuda and not cfg.distributed_training.pipeline_model_parallel:
             model.cuda()
         model.prepare_for_inference_(cfg)
 
-    cfg.dataset.batch_size = 1
+
+def _main(cfg, output_file):
+    from http import HTTPStatus
+    from flask import Flask, request
+
+    app = Flask(__name__)
+
+    logging.basicConfig(
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        level=os.environ.get("LOGLEVEL", "INFO").upper(),
+        stream=output_file,
+    )
+    logger = logging.getLogger("hybrid.speech_recognize")
+    if output_file is not sys.stdout:  # also print to stdout
+        logger.addHandler(logging.StreamHandler(sys.stdout))
+
+    arg_overrides = {
+        'model': {
+            'w2v_path': '/home/domhnall/Repos/lip2speech-unit/multi_target_lip2speech/checkpoints/large_vox_iter5.pt',
+            'checkpoint_path': None
+        }
+    }
+
+    use_cuda = torch.cuda.is_available()
+
+    utils.import_user_module(cfg.common)
+
+    with open(cfg.override.checkpoints_data_path, 'r') as f:
+        checkpoints_data = json.load(f)
+    default_checkpoint_id = checkpoints_data['default_checkpoint_id']
+
+    load_checkpoints(checkpoints_data['checkpoints'], arg_overrides)
+    setup_config_and_task(cfg)
+    switch_model(default_checkpoint_id, cfg, use_cuda)
 
     def decode_fn(x, generator):
         symbols_ignore = get_symbols_to_strip_from_output(generator)
@@ -179,6 +223,27 @@ def _main(cfg, output_file):
         words = " ".join("".join(chars.split()).replace('|', ' ').split())
 
         return words
+
+    @app.get('/checkpoints')
+    def get_checkpoints():
+        return list(checkpoints_data['checkpoints'].keys())
+
+    @app.post('/load_checkpoint')
+    def load_checkpoint():
+        global loaded_checkpoint_id
+
+        checkpoint_id = request.json['checkpoint_id']
+        if checkpoint_id == loaded_checkpoint_id:
+            return '', HTTPStatus.NO_CONTENT
+
+        if not checkpoints_data['checkpoints'].get(checkpoint_id):
+            return {'message': f'Checkpoint \'{checkpoint_id}\' does not exist'}, HTTPStatus.BAD_REQUEST
+
+        switch_model(checkpoint_id, cfg, use_cuda)
+
+        loaded_checkpoint_id = checkpoint_id
+
+        return '', HTTPStatus.NO_CONTENT
 
     @app.post('/synthesise')
     def synthesise():

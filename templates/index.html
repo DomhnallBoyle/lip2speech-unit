@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+    <head>
+        <title>VSG Demo</title>
+        <meta http-equiv="ScreenOrientation" content="autoRotate:disabled">
+    </head>
+    <body>
+        <h2><u>Visual Speech Synthesis:</u></h2>
+
+        <div>
+            <div id="controls">
+                <div id="checkpoint-selection">
+                    <h3>Model Selection</h3>
+                    <select id="checkpoint-source">
+                        {% for checkpoint_id in checkpoint_ids %}
+                            <option value="{{ checkpoint_id }}">{{ checkpoint_id }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <br><hr>
+
+                <div id="audio-selection">
+                    <h3>Audio Selection (for speaker characteristics)</h3>
+                    <h5>NOTE: Priority is given to an uploaded audio file</h5>
+                    {% for audio_path in audio_paths %}
+                        <audio id="audio-{{ loop.index0 }}" src="{{ audio_path }}" type="audio/wav" controls></audio>
+                        <input type="radio" value="{{ loop.index0 }}" name="checked-audio"/>
+                        <br>
+                    {% endfor %}<br>
+                    <input id="audio-upload" type="file"/><br>
+                </div>
+
+                <br><hr>
+
+                <div id="recorded-input">
+                    <h3>Webcam Record</h3>
+                    Video Source: <select id="video-source"></select>
+                    <button id="camera-settings">Camera Settings</button><br><br>
+                    <video id="video" height="400" width="600" autoplay muted playsinline></video><br><br>
+                    <button id="start">Record</button>
+                    <button id="stop">Synthesise</button><br>
+                </div>
+
+                <br><hr>
+
+                <div id="uploaded-input">
+                    <h3>Video Upload</h3>
+                    <input id="video-upload" type="file"/><br>
+                    <button id="upload">Synthesise</button><br>
+                </div>
+            </div>
+
+            <div id="history-container">
+                <h3>History</h3>
+                <button id="clear">Clear All</button>
+                <div id="history"></div>
+            </div>
+        </div>
+    </body>
+
+    <style>
+        html, body {
+            height: 100%; 
+            overflow: hidden
+        }
+        body {
+            margin-left: 10px; 
+            padding-left: 10px;
+        }
+        #controls {
+            width: 50%;
+            float: left;
+            overflow: auto;
+            max-height: 80vh;
+        }
+        #history {
+            width: 50%;
+            float: right;
+            overflow: auto;
+            max-height: 80vh;
+        }
+        .history-element {
+            height: 425px;
+        }
+        .video-div {
+            width: 60%;
+            float: left;
+            height: 100%;
+        }
+        .stats-div {
+            width: 40%;
+            float: right;
+            height: 100%;
+        }
+        #controls hr {
+            width: 75%;
+            margin-left: 0;
+        }
+        fieldset {
+            min-width: auto;
+            display: inline;
+        }
+        .history-element .history-counter {
+            display: inline;
+        }
+    </style>
+
+    <script>
+        "use strict";
+
+        var video, videoSelect, startBtn, stopBtn, uploadBtn, clearBtn, cameraSettingsBtn, camAvailable = false, historyCounter = 0;
+        var chunks = [];
+
+        video = document.getElementById("video");
+        videoSelect = document.getElementById("video-source");
+        startBtn = document.getElementById("start");
+        stopBtn = document.getElementById("stop");
+        uploadBtn = document.getElementById("upload");
+        clearBtn = document.getElementById("clear");
+        cameraSettingsBtn = document.getElementById("camera-settings");
+
+        videoSelect.onchange = getStream;
+        uploadBtn.onclick = uploadVideo;
+        clearBtn.onclick = clearHistory;
+        cameraSettingsBtn.onclick = showCameraSettings;
+        startBtn.disabled = true;
+        stopBtn.disabled = true;
+
+        getStream().then(getDevices).then(gotDevices);
+
+        function assert(x, y, msg) {
+            if (x !== y)
+                alert(msg);
+        }
+
+        function showCameraSettings() {
+            if (!window.stream) {
+                alert("None");
+                return;
+            }
+
+            var cameraSettings = window.stream.getVideoTracks()[0].getSettings();
+            var cameraSettingsText = "Frame Rate: " + cameraSettings.frameRate + " fps \n";
+            cameraSettingsText += "Width: " +  cameraSettings.width + "\n";
+            cameraSettingsText += "Height: " + cameraSettings.height;
+            alert(cameraSettingsText);
+        }
+
+        function getDevices() {
+            return navigator.mediaDevices.enumerateDevices();
+        }
+
+        function gotDevices(deviceInfos) {
+            window.deviceInfos = deviceInfos;
+            for (const deviceInfo of deviceInfos) {
+                const option = document.createElement("option");
+                option.value = deviceInfo.deviceId;
+                if (deviceInfo.kind === "videoinput") {
+                    option.text = deviceInfo.label || "Camera ${videoSelect.length + 1}";
+                    videoSelect.appendChild(option);
+                }
+            }
+        }
+
+        function getStream() {
+            if (window.stream) {
+                window.stream.getTracks().forEach(track => {
+                    track.stop();
+                });
+            }
+            const videoSource = videoSelect.value;
+            const constraints = {
+                video: {
+                    deviceId: videoSource ? {exact: videoSource} : undefined
+                }
+            };
+            return navigator.mediaDevices.getUserMedia(constraints).then(gotStream).catch(handleError);
+        }
+
+        function gotStream(stream) {
+            window.stream = stream;
+            videoSelect.selectedIndex = [...videoSelect.options].findIndex(option => option.text === stream.getVideoTracks()[0].label);
+            startBtn.removeAttribute("disabled");
+            camAvailable = true;
+            video.srcObject = stream;
+            
+            const recorder = new MediaRecorder(stream);
+
+            startBtn.onclick = function() {
+                recorder.start();
+                stopBtn.removeAttribute("disabled");
+                startBtn.disabled = true;
+                startBtn.textContent = "Recording...";
+            };
+            stopBtn.onclick = function() {
+                recorder.stop();
+            };
+
+            recorder.onstop = function(e) {
+                startBtn.textContent = "Record";
+                stopBtn.disabled = true;
+                stopBtn.textContent = "Please Wait...";
+                const blob = new Blob(chunks, {type: "video/webm"});
+                synthesise(blob);
+                chunks = [];
+            };
+
+            recorder.ondataavailable = function(e) {
+                if (e.data.size > 0)
+                    chunks.push(e.data);
+            };
+        }
+
+        function handleError(error) {
+            console.error("Error: ", error);
+        }
+
+        function synthesise(videoData) {
+            var checkpointId = document.getElementById("checkpoint-source").value;
+
+            var audioFile = document.getElementById("audio-upload").files[0];
+            if (!audioFile) {
+                var checkedAudio = document.querySelector("input[name='checked-audio']:checked");
+                if (checkedAudio) {
+                    var checkedAudioIndex = checkedAudio.value;
+                
+                    var audioElement = document.getElementById("audio-" + checkedAudioIndex);
+                    var xhr = new XMLHttpRequest();
+                    xhr.open("GET", audioElement.src);
+                    xhr.responseType = "arraybuffer";
+                    xhr.onload = e => {
+                        var audioFileName = audioElement.src.replace(/^.*[\\\/]/, '');
+                        audioFile = new File([xhr.response], audioFileName);
+                        run_synthesis(videoData, audioFile, checkpointId);
+                    };
+                    xhr.send();
+                } else {
+                    run_synthesis(videoData, null, checkpointId);
+                }
+            } else {
+                run_synthesis(videoData, audioFile, checkpointId);
+            }
+        }
+    
+        function run_synthesis(videoData, audioFile, checkpointId) {
+            // create form data
+            var formData = new FormData();
+            formData.append("video", videoData);
+            if (audioFile)
+                formData.append("audio", audioFile);
+            formData.append("checkpoint_id", checkpointId);
+
+            // measure time taken
+            var startTime;
+
+            var xhr = new XMLHttpRequest();
+            xhr.addEventListener("load", function(event) {
+                var jsonResponse = xhr.response;
+                if (xhr.status != 200) {
+                    alert(jsonResponse["message"]);
+                } else {
+                    var jsonResponse = xhr.response;
+                    var videoURL = jsonResponse["video_url"];
+                    var asrPredictions = jsonResponse["asr_predictions"];
+
+                    var asrText = "Whisper ASR Predictions:<br>";                      
+                    if (asrPredictions.length > 0) {
+                        for (var i = 0; i < asrPredictions.length; i++) {
+                            asrText += (i+1) + ": " + asrPredictions[i] + "<br>";
+                        }
+                    } else {
+                        asrText += "None";
+                    }
+
+                    var timeTaken = (performance.now() - startTime) / 1000;
+                    timeTaken = Math.round(timeTaken * 100 + Number.EPSILON) / 100
+                    var timeTakenText = "<br>Time Taken: " + timeTaken + " seconds<br>";
+
+                    appendToHistory(videoURL, checkpointId, asrText, timeTakenText);
+                }
+                resetDOM();
+            });
+            xhr.open("POST", "/synthesise");
+            xhr.responseType = "json";
+            startTime = performance.now();
+            xhr.send(formData);
+        }
+
+        function resetDOM() {
+            if (camAvailable)
+                startBtn.removeAttribute("disabled");
+            stopBtn.textContent = "Synthesise";
+            uploadBtn.removeAttribute("disabled");
+            uploadBtn.textContent = "Synthesise";
+        }
+
+        function uploadVideo() {
+            var videoFile = document.getElementById("video-upload").files[0];
+            if (!videoFile) {
+                alert("Please select a video file");
+            } else {
+                uploadBtn.disabled = true;
+                uploadBtn.textContent = "Please Wait...";
+                synthesise(videoFile);
+            }
+        }
+
+        function appendToHistory(videoURL, checkpointId, asrText, timeTakenText) {
+            var div = document.createElement("div");
+            var videoDiv = document.createElement("div");
+            var statsDiv = document.createElement("div");
+
+            div.className = "history-element";
+            videoDiv.className = "video-div";
+            statsDiv.className = "stats-div";
+
+            div.innerHTML = '<br><p class="history-counter">' + ++historyCounter + ': </p><button class="remove-element-btn" onclick="removeFromHistory(this)">Remove</button><br>';
+            videoDiv.innerHTML = '<video src="' + videoURL + '" height="400" width="500" type="video/mp4" autoplay controls></video>';
+            statsDiv.innerHTML += "Model Used: " + checkpointId + "<br><br>";
+            statsDiv.innerHTML += asrText;
+            statsDiv.innerHTML += timeTakenText;
+            div.appendChild(videoDiv);
+            div.appendChild(statsDiv);
+
+            document.getElementById("history").appendChild(div);
+            div.scrollIntoView();
+        }
+
+        function removeFromHistory(button) {
+            // get containing div
+            var parentDiv = button.parentNode;
+            parentDiv.remove();
+
+            // reset counter of history elements
+            historyCounter = 0;
+            var historyDiv = document.getElementById("history");
+            var historyElements = historyDiv.childNodes;
+            for (var i = 0; i < historyElements.length; i++) {
+                var historyElement = historyElements[i];
+                historyElement.getElementsByClassName("history-counter")[0].innerText = ++historyCounter + ": ";
+            }
+        }
+
+        function clearHistory() {
+            document.getElementById("history").innerHTML = "";
+            historyCounter = 0;
+        }
+
+    </script>
+</html>

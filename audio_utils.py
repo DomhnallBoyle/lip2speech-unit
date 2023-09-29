@@ -95,4 +95,3 @@ def preprocess_audio(audio_path, output_path, delay=3, sr=16000):
 
     shutil.copyfile(stripped_audio_file.name, output_path)
     stripped_audio_file.close()  
-
