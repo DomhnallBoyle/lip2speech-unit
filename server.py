@@ -130,6 +130,12 @@ def web_app(args=None, args_path=None):
         with open(args_path, 'r') as f:
             args = SimpleNamespace(**json.load(f))
 
+    assert 'audio_paths' in args.__dict__
+    args.audio_paths = [p for p in args.audio_paths if p]
+    assert len(args.audio_paths) > 0, f'Audio paths required'
+    assert len(args.audio_paths) == len(set(args.audio_paths)), f'Non-unique audio paths'
+    assert 'web_client_run_asr' in args.__dict__
+
     # setup static and server directories
     for d in [INPUTS_PATH, STATIC_PATH]:
         d.mkdir(parents=True, exist_ok=True)
@@ -137,11 +143,6 @@ def web_app(args=None, args_path=None):
     if not DB_PATH.exists():
         logging.info('Database does not exist, run migrations...')
         return
-
-    assert 'audio_paths' in args.__dict__
-    args.audio_paths = [p for p in args.audio_paths if p]
-    assert len(args.audio_paths) > 0, f'Audio paths required'
-    assert len(args.audio_paths) == len(set(args.audio_paths)), f'Non-unique audio paths'
 
     # move any audio files to static and pre-load speaker embeddings for them
     for i, audio_path in enumerate(args.audio_paths):
@@ -203,7 +204,8 @@ def web_app(args=None, args_path=None):
     def demo():
         return render_template('index.html', **{
             'audio_paths': args.audio_paths,
-            'checkpoint_ids': checkpoint_ids
+            'checkpoint_ids': checkpoint_ids, 
+            'web_client_run_asr': int(args.web_client_run_asr)
         })
 
     @app.post('/synthesise')
@@ -333,11 +335,14 @@ def web_app(args=None, args_path=None):
             output_video_path=video_download_path
         )
 
-        # get asr results
-        start_time = time.time()
-        asr_preds = asr.run(pred_audio_path)
-        time_taken = round(time.time() - start_time, 2)
-        logging.info(f'Whisper ASR took {time_taken} secs')
+        # get asr results - on by default
+        run_asr = bool(int(request.args.get('asr', 1)))
+        asr_preds = []
+        if run_asr:
+            start_time = time.time()
+            asr_preds = asr.run(pred_audio_path)
+            time_taken = round(time.time() - start_time, 2)
+            logging.info(f'Whisper ASR took {time_taken} secs')
     
         # log results in the db
         with DB(DB_PATH) as cur:
@@ -376,6 +381,7 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('audio_paths', type=lambda s: s.split(','))
+    parser.add_argument('--web_client_run_asr', action='store_true')
     parser.add_argument('--port', type=int, default=5002)
     parser.add_argument('--debug', action='store_true')
 

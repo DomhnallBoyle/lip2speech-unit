@@ -8,14 +8,16 @@
 
         <div>
             <div id="controls">
-                <div id="checkpoint-selection">
-                    <h3>Model Selection</h3>
-                    <select id="checkpoint-source">
-                        {% for checkpoint_id in checkpoint_ids %}
-                            <option value="{{ checkpoint_id }}">{{ checkpoint_id }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
+                {% if checkpoint_ids %}
+                    <div id="checkpoint-selection">
+                        <h3>Model Selection</h3>
+                        <select id="checkpoint-source">
+                            {% for checkpoint_id in checkpoint_ids %}
+                                <option value="{{ checkpoint_id }}">{{ checkpoint_id }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                {% endif %}
 
                 <br><hr>
 
@@ -263,24 +265,24 @@
                     var videoURL = jsonResponse["video_url"];
                     var asrPredictions = jsonResponse["asr_predictions"];
 
-                    var asrText = "Whisper ASR Predictions:<br>";                      
+                    var asrText = null;                      
                     if (asrPredictions.length > 0) {
+                        var asrText = "<br>Whisper ASR Predictions:<br>";  
                         for (var i = 0; i < asrPredictions.length; i++) {
                             asrText += (i+1) + ": " + asrPredictions[i] + "<br>";
                         }
-                    } else {
-                        asrText += "None";
+                        asrText += "<br>";
                     }
 
                     var timeTaken = (performance.now() - startTime) / 1000;
                     timeTaken = Math.round(timeTaken * 100 + Number.EPSILON) / 100
-                    var timeTakenText = "<br>Time Taken: " + timeTaken + " seconds<br>";
+                    var timeTakenText = "Time Taken: " + timeTaken + " seconds<br>";
 
                     appendToHistory(videoURL, checkpointId, asrText, timeTakenText);
                 }
                 resetDOM();
             });
-            xhr.open("POST", "/synthesise");
+            xhr.open("POST", "/synthesise?asr={{ web_client_run_asr }}");
             xhr.responseType = "json";
             startTime = performance.now();
             xhr.send(formData);
@@ -316,8 +318,9 @@
 
             div.innerHTML = '<br><p class="history-counter">' + ++historyCounter + ': </p><button class="remove-element-btn" onclick="removeFromHistory(this)">Remove</button><br>';
             videoDiv.innerHTML = '<video src="' + videoURL + '" height="400" width="500" type="video/mp4" autoplay controls></video>';
-            statsDiv.innerHTML += "Model Used: " + checkpointId + "<br><br>";
-            statsDiv.innerHTML += asrText;
+            statsDiv.innerHTML += "Model Used: " + checkpointId + "<br>";
+            if (asrText)
+                statsDiv.innerHTML += asrText;
             statsDiv.innerHTML += timeTakenText;
             div.appendChild(videoDiv);
             div.appendChild(statsDiv);
