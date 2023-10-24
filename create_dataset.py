@@ -80,7 +80,6 @@ def extract_mel_spec(audio_path):
 
 
 def init_process(process_index, args, sample_paths, already_processed, to_process):
-    names = []
     cropped_video_path = f'/tmp/video_cropped_{process_index}.mp4'
     preprocessed_audio_path = f'/tmp/preprocessed_audio_{process_index}.wav'
 
@@ -92,7 +91,8 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
             continue
 
         # can't use original mouth frames because they were converted to 20 FPS
-        video_path, _, speaker_embedding, _ = np.load(sample_path, allow_pickle=True)['sample']
+        sample = np.load(sample_path, allow_pickle=True)['sample']
+        video_path, speaker_embedding = sample[0], sample[2]
         if args.replace_paths:
             for k, v in args.replace_paths.items():
                 video_path = str(video_path).replace(k, v)
@@ -153,12 +153,8 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
             with args.landmarks_directory.joinpath(f'{name}.pkl').open('wb') as f:
                 pickle.dump(face_landmarks, f)
 
-        names.append(name)
-
         with args.processed_path.open('a') as f:
             f.write(f'{sample_path}\n')
-
-    return names
 
 
 def init(args):
@@ -204,14 +200,19 @@ def init(args):
 
     tasks = [[i, args, _sample_paths, already_processed, to_process]
              for i, _sample_paths in enumerate(split_list(sample_paths, args.num_processes))]
-    names = []
     with multiprocessing.Pool(processes=args.num_processes) as p:
-        results = p.starmap(init_process, tasks)
-        for _names in results:
-            names.extend(_names)
+        p.starmap(init_process, tasks)
+
+
+def generate_file_list(args):
+    dataset_directory = Path(args.dataset_directory)
+
+    names = []
+    for video_path in dataset_directory.joinpath(args.type).glob('*.mp4'):
+        names.append(video_path.stem)
 
     # create file list
-    with output_directory.joinpath(f'{args.type}_file.list').open('w') as f:
+    with dataset_directory.joinpath(f'{args.type}_file.list').open('w') as f:
         for name in names:
             f.write(f'{args.type}/{name}\n')
 
@@ -293,6 +294,7 @@ def vocoder(args):
 def main(args):
     f = {
         'init': init,
+        'generate_file_list': generate_file_list,
         'manifests': manifests,
         'vocoder': vocoder
     }
@@ -319,10 +321,12 @@ if __name__ == '__main__':
     parser_1.add_argument('--max_duration', type=int)
     parser_1.add_argument('--redo', action='store_true')
 
-    parser_2 = sub_parser.add_parser('manifests')
-    parser_2.add_argument('--dict_path')
+    parser_2 = sub_parser.add_parser('generate_file_list')
 
-    parser_3 = sub_parser.add_parser('vocoder')
-    parser_3.add_argument('synthesis_directory')
+    parser_3 = sub_parser.add_parser('manifests')
+    parser_3.add_argument('--dict_path')
+
+    parser_4 = sub_parser.add_parser('vocoder')
+    parser_4.add_argument('synthesis_directory')
 
     main(parser.parse_args())

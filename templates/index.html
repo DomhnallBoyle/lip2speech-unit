@@ -2,9 +2,13 @@
     <head>
         <title>VSG Demo</title>
         <meta http-equiv="ScreenOrientation" content="autoRotate:disabled">
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.0/socket.io.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.0/socket.io.msgpack.min.js"></script>
     </head>
     <body>
         <h2><u>Visual Speech Synthesis:</u></h2>
+        
+        <canvas id="frame-canvas" hidden></canvas>
 
         <div>
             <div id="controls">
@@ -184,8 +188,20 @@
             videoSelect.selectedIndex = [...videoSelect.options].findIndex(option => option.text === stream.getVideoTracks()[0].label);
             startBtn.removeAttribute("disabled");
             camAvailable = true;
-            video.srcObject = stream;
+            video.srcObject = stream
             
+            const canvas = document.getElementById("frame-canvas");
+            const canvasContext = canvas.getContext("2d");
+            canvas.width = video.clientWidth;
+            canvas.height = video.clientHeight;
+            if (window.updateCanvasInterval)
+                clearInterval(window.updateCanvasInterval);
+            window.updateCanvasInterval = setInterval(() => {
+                canvasContext.drawImage(video, 0, 0, canvas.width, canvas.height);
+            }, 10); // 0.01 seconds
+            
+            var socket = null;
+
             const recorder = new MediaRecorder(stream);
 
             startBtn.onclick = function() {
@@ -193,6 +209,21 @@
                 stopBtn.removeAttribute("disabled");
                 startBtn.disabled = true;
                 startBtn.textContent = "Recording...";
+
+                var frameIndex = 0;
+                var protocol = location.protocol == "https:" ? "wss:" : "ws:";
+
+                // doesn't allow HTTP long-polling transport
+                socket = io(protocol + "//" + location.host, { transports: ["websocket"] });
+                window.sendFrameInterval = setInterval(() => {
+
+                    canvas.toBlob((frameBlob) => {
+                        objToBinary(frameBlob).then((frameBinary) => {
+                            socket.emit("frame", frameIndex++, frameBinary);
+                        });
+                    }, "image/jpeg"); // default quality = 0.92
+
+                }, 40); // 25fps = 1 second / 25 frames = 0.04 seconds
             };
             stopBtn.onclick = function() {
                 recorder.stop();
@@ -202,14 +233,25 @@
                 startBtn.textContent = "Record";
                 stopBtn.disabled = true;
                 stopBtn.textContent = "Please Wait...";
-                const blob = new Blob(chunks, {type: "video/webm"});
-                synthesise(blob);
-                chunks = [];
-            };
+                
+                clearInterval(window.sendFrameInterval);
+                
+                getAudioFile(function(audioFile) {
+                    var audioName = (audioFile) ? audioFile.name : null;
+                    var checkpointId = getCheckpointId();
 
-            recorder.ondataavailable = function(e) {
-                if (e.data.size > 0)
-                    chunks.push(e.data);
+                    // measure time taken
+                    var startTime = performance.now();
+
+                    objToBinary(audioFile).then((audioBinary) => {
+                        socket.emit("end_stream", checkpointId, audioBinary, audioName, "{{ web_client_run_asr }}");
+                    });
+                    
+                    socket.on("synthesise_response", (response, status_code) => {
+                        handleResponse(response, status_code, checkpointId, startTime);
+                        socket.disconnect(); // runs emit("disconnect")
+                    });
+                })
             };
         }
 
@@ -217,34 +259,69 @@
             console.error("Error: ", error);
         }
 
-        function synthesise(videoData) {
-            var checkpointId = document.getElementById("checkpoint-source").value;
+        async function objToBinary(obj) {
+            if (!obj)
+                return null;
 
+            return await obj.arrayBuffer();
+        }
+
+        function getCheckpointId() {
+            return document.getElementById("checkpoint-source").value;
+        }
+
+        function getAudioFile(callback) {
             var audioFile = document.getElementById("audio-upload").files[0];
+        
             if (!audioFile) {
                 var checkedAudio = document.querySelector("input[name='checked-audio']:checked");
+                
                 if (checkedAudio) {
                     var checkedAudioIndex = checkedAudio.value;
-                
+
                     var audioElement = document.getElementById("audio-" + checkedAudioIndex);
                     var xhr = new XMLHttpRequest();
                     xhr.open("GET", audioElement.src);
                     xhr.responseType = "arraybuffer";
                     xhr.onload = e => {
                         var audioFileName = audioElement.src.replace(/^.*[\\\/]/, '');
-                        audioFile = new File([xhr.response], audioFileName);
-                        run_synthesis(videoData, audioFile, checkpointId);
+                        callback(new File([xhr.response], audioFileName));
                     };
                     xhr.send();
                 } else {
-                    run_synthesis(videoData, null, checkpointId);
+                    callback(null);
                 }
             } else {
-                run_synthesis(videoData, audioFile, checkpointId);
+                callback(audioFile);
             }
         }
-    
-        function run_synthesis(videoData, audioFile, checkpointId) {
+
+        function handleResponse(jsonResponse, statusCode, checkpointId, startTime) {
+            if (statusCode != 200)
+                alert(jsonResponse["message"]);
+            else {
+                var videoId = jsonResponse["videoId"];
+                var asrPredictions = jsonResponse["asrPredictions"];
+
+                var asrText = null;
+                if (asrPredictions.length > 0) {
+                    var asrText = "<br>Whisper ASR Predictions:<br>";
+                    for (var i = 0; i < asrPredictions.length; i++) {
+                        asrText += (i+1) + ": " + asrPredictions[i] + "<br>";
+                    }
+                    asrText += "<br>";
+                }
+
+                var timeTaken = (performance.now() - startTime) / 1000;
+                timeTaken = Math.round(timeTaken * 100 + Number.EPSILON) / 100;
+                var timeTakenText = "Time Taken: " + timeTaken + " seconds<br>";
+
+                appendToHistory(videoId, checkpointId, asrText, timeTakenText);
+            }
+            resetDOM();
+        }
+
+        function synthesise(videoData, audioFile, checkpointId) {
             // create form data
             var formData = new FormData();
             formData.append("video", videoData);
@@ -257,30 +334,7 @@
 
             var xhr = new XMLHttpRequest();
             xhr.addEventListener("load", function(event) {
-                var jsonResponse = xhr.response;
-                if (xhr.status != 200) {
-                    alert(jsonResponse["message"]);
-                } else {
-                    var jsonResponse = xhr.response;
-                    var videoURL = jsonResponse["video_url"];
-                    var asrPredictions = jsonResponse["asr_predictions"];
-
-                    var asrText = null;                      
-                    if (asrPredictions.length > 0) {
-                        var asrText = "<br>Whisper ASR Predictions:<br>";  
-                        for (var i = 0; i < asrPredictions.length; i++) {
-                            asrText += (i+1) + ": " + asrPredictions[i] + "<br>";
-                        }
-                        asrText += "<br>";
-                    }
-
-                    var timeTaken = (performance.now() - startTime) / 1000;
-                    timeTaken = Math.round(timeTaken * 100 + Number.EPSILON) / 100
-                    var timeTakenText = "Time Taken: " + timeTaken + " seconds<br>";
-
-                    appendToHistory(videoURL, checkpointId, asrText, timeTakenText);
-                }
-                resetDOM();
+                handleResponse(xhr.response, xhr.status, checkpointId, startTime);
             });
             xhr.open("POST", "/synthesise?asr={{ web_client_run_asr }}");
             xhr.responseType = "json";
@@ -303,11 +357,14 @@
             } else {
                 uploadBtn.disabled = true;
                 uploadBtn.textContent = "Please Wait...";
-                synthesise(videoFile);
+
+                getAudioFile(function(audioFile) {
+                    synthesise(videoFile, audioFile, getCheckpointId());
+                });
             }
         }
 
-        function appendToHistory(videoURL, checkpointId, asrText, timeTakenText) {
+        function appendToHistory(videoId, checkpointId, asrText, timeTakenText) {
             var div = document.createElement("div");
             var videoDiv = document.createElement("div");
             var statsDiv = document.createElement("div");
@@ -317,7 +374,7 @@
             statsDiv.className = "stats-div";
 
             div.innerHTML = '<br><p class="history-counter">' + ++historyCounter + ': </p><button class="remove-element-btn" onclick="removeFromHistory(this)">Remove</button><br>';
-            videoDiv.innerHTML = '<video src="' + videoURL + '" height="400" width="500" type="video/mp4" autoplay controls></video>';
+            videoDiv.innerHTML = '<video src="/video/' + videoId + '" height="400" width="500" type="video/mp4" autoplay controls></video>';
             statsDiv.innerHTML += "Model Used: " + checkpointId + "<br>";
             if (asrText)
                 statsDiv.innerHTML += asrText;

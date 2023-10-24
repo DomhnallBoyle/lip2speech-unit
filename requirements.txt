@@ -94,3 +94,7 @@ gunicorn==21.2.0
 jiwer==3.0.3
 tensorboard==2.14.0
 ffmpeg-normalize==1.27.6
+flask-socketio==5.3.6
+websocket-client==1.6.3
+redis==5.0.1
+eventlet==0.33.3
