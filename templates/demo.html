@@ -2,11 +2,13 @@
     <head>
         <title>VSG Demo</title>
         <meta http-equiv="ScreenOrientation" content="autoRotate:disabled">
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.0/socket.io.min.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.0/socket.io.msgpack.min.js"></script>
+        <script type="application/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.0/socket.io.min.js"></script>
+        <script type="application/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.0/socket.io.msgpack.min.js"></script>
+        <script type="application/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+        <script type="application/javascript" src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     </head>
     <body>
-        <h2><u>Visual Speech Synthesis:</u></h2>
+        <h2><u>Visual Speech Generator:</u></h2>
         
         <canvas id="frame-canvas" hidden></canvas>
 
@@ -114,16 +116,13 @@
     <script>
         "use strict";
 
-        var video, videoSelect, startBtn, stopBtn, uploadBtn, clearBtn, cameraSettingsBtn, camAvailable = false, historyCounter = 0;
-        var chunks = [];
-
-        video = document.getElementById("video");
-        videoSelect = document.getElementById("video-source");
-        startBtn = document.getElementById("start");
-        stopBtn = document.getElementById("stop");
-        uploadBtn = document.getElementById("upload");
-        clearBtn = document.getElementById("clear");
-        cameraSettingsBtn = document.getElementById("camera-settings");
+        var video = document.getElementById("video");
+        var videoSelect = document.getElementById("video-source");
+        var startBtn = document.getElementById("start");
+        var stopBtn = document.getElementById("stop");
+        var uploadBtn = document.getElementById("upload");
+        var clearBtn = document.getElementById("clear");
+        var cameraSettingsBtn = document.getElementById("camera-settings");
 
         videoSelect.onchange = getStream;
         uploadBtn.onclick = uploadVideo;
@@ -132,6 +131,12 @@
         startBtn.disabled = true;
         stopBtn.disabled = true;
 
+        var camAvailable = false;
+        var historyCounter = 0;
+        var useASR = {{ web_client_run_asr }};
+        var useStreaming = {{ web_client_streaming | tojson }};
+        var chunks = [];
+
         getStream().then(getDevices).then(gotDevices);
 
         function assert(x, y, msg) {
@@ -139,17 +144,26 @@
                 alert(msg);
         }
 
+        function fireToast(text, html, icon) {
+            Swal.fire({
+                title: "VSG",
+                text: text,
+                html: html,
+                icon: icon
+            });
+        }
+
         function showCameraSettings() {
-            if (!window.stream) {
-                alert("None");
-                return;
+            var cameraSettingsText = "None";
+
+            if (window.stream) {
+                var cameraSettings = window.stream.getVideoTracks()[0].getSettings();
+                cameraSettingsText = "Frame Rate: " + cameraSettings.frameRate + " fps<br>";
+                cameraSettingsText += "Width: " +  cameraSettings.width + "<br>";
+                cameraSettingsText += "Height: " + cameraSettings.height;
             }
 
-            var cameraSettings = window.stream.getVideoTracks()[0].getSettings();
-            var cameraSettingsText = "Frame Rate: " + cameraSettings.frameRate + " fps \n";
-            cameraSettingsText += "Width: " +  cameraSettings.width + "\n";
-            cameraSettingsText += "Height: " + cameraSettings.height;
-            alert(cameraSettingsText);
+            fireToast(null, cameraSettingsText, "info");
         }
 
         function getDevices() {
@@ -190,17 +204,21 @@
             camAvailable = true;
             video.srcObject = stream
             
-            const canvas = document.getElementById("frame-canvas");
-            const canvasContext = canvas.getContext("2d");
-            canvas.width = video.clientWidth;
-            canvas.height = video.clientHeight;
-            if (window.updateCanvasInterval)
-                clearInterval(window.updateCanvasInterval);
-            window.updateCanvasInterval = setInterval(() => {
-                canvasContext.drawImage(video, 0, 0, canvas.width, canvas.height);
-            }, 10); // 0.01 seconds
-            
-            var socket = null;
+            var canvas;
+
+            if (useStreaming) {
+                canvas = document.getElementById("frame-canvas");
+                const canvasContext = canvas.getContext("2d");
+                canvas.width = video.clientWidth;
+                canvas.height = video.clientHeight;
+                if (window.updateCanvasInterval)
+                    clearInterval(window.updateCanvasInterval);
+                window.updateCanvasInterval = setInterval(() => {
+                    canvasContext.drawImage(video, 0, 0, canvas.width, canvas.height);
+                }, 10); // 0.01 seconds
+                
+                var socket = null;
+            }
 
             const recorder = new MediaRecorder(stream);
 
@@ -210,20 +228,22 @@
                 startBtn.disabled = true;
                 startBtn.textContent = "Recording...";
 
-                var frameIndex = 0;
-                var protocol = location.protocol == "https:" ? "wss:" : "ws:";
+                if (useStreaming) {
+                    var frameIndex = 0;
+                    var protocol = location.protocol == "https:" ? "wss:" : "ws:";
 
-                // doesn't allow HTTP long-polling transport
-                socket = io(protocol + "//" + location.host, { transports: ["websocket"] });
-                window.sendFrameInterval = setInterval(() => {
+                    // doesn't allow HTTP long-polling transport
+                    socket = io(protocol + "//" + location.host, { transports: ["websocket"] });
+                    window.sendFrameInterval = setInterval(() => {
 
-                    canvas.toBlob((frameBlob) => {
-                        objToBinary(frameBlob).then((frameBinary) => {
-                            socket.emit("frame", frameIndex++, frameBinary);
-                        });
-                    }, "image/jpeg"); // default quality = 0.92
+                        canvas.toBlob((frameBlob) => {
+                            objToBinary(frameBlob).then((frameBinary) => {
+                                socket.emit("frame", frameIndex++, frameBinary);
+                            });
+                        }, "image/jpeg", 0.8); // default quality = 0.92
 
-                }, 40); // 25fps = 1 second / 25 frames = 0.04 seconds
+                    }, 40); // 25fps = 1 second / 25 frames = 0.04 seconds
+                }
             };
             stopBtn.onclick = function() {
                 recorder.stop();
@@ -240,19 +260,32 @@
                     var audioName = (audioFile) ? audioFile.name : null;
                     var checkpointId = getCheckpointId();
 
-                    // measure time taken
-                    var startTime = performance.now();
+                    if (useStreaming) {
+                        // measure time taken
+                        var startTime = performance.now();
 
-                    objToBinary(audioFile).then((audioBinary) => {
-                        socket.emit("end_stream", checkpointId, audioBinary, audioName, "{{ web_client_run_asr }}");
-                    });
-                    
-                    socket.on("synthesise_response", (response, status_code) => {
-                        handleResponse(response, status_code, checkpointId, startTime);
-                        socket.disconnect(); // runs emit("disconnect")
-                    });
-                })
+                        objToBinary(audioFile).then((audioBinary) => {
+                            socket.emit("end_stream", checkpointId, audioBinary, audioName, useASR);
+                        });
+                        
+                        socket.on("synthesise_response", (response, status_code) => {
+                            handleResponse(response, status_code, checkpointId, startTime);
+                            socket.disconnect(); // runs emit("disconnect")
+                        });
+                    } else {
+                        const blob = new Blob(chunks, {type: "video/webm"});
+                        synthesise(blob, audioFile, checkpointId);
+                        chunks = [];
+                    }
+                });
             };
+
+            if (!useStreaming) {
+                recorder.ondataavailable = function(e) {
+                    if (e.data.size > 0)
+                        chunks.push(e.data);
+                };
+            }
         }
 
         function handleError(error) {
@@ -298,7 +331,7 @@
 
         function handleResponse(jsonResponse, statusCode, checkpointId, startTime) {
             if (statusCode != 200)
-                alert(jsonResponse["message"]);
+                fireToast(jsonResponse["message"], null, "error");
             else {
                 var videoId = jsonResponse["videoId"];
                 var asrPredictions = jsonResponse["asrPredictions"];
@@ -336,7 +369,7 @@
             xhr.addEventListener("load", function(event) {
                 handleResponse(xhr.response, xhr.status, checkpointId, startTime);
             });
-            xhr.open("POST", "/synthesise?asr={{ web_client_run_asr }}");
+            xhr.open("POST", "/synthesise?asr=" + useASR);
             xhr.responseType = "json";
             startTime = performance.now();
             xhr.send(formData);
@@ -353,7 +386,7 @@
         function uploadVideo() {
             var videoFile = document.getElementById("video-upload").files[0];
             if (!videoFile) {
-                alert("Please select a video file");
+                fireToast("Please select a video file", null, "error");
             } else {
                 uploadBtn.disabled = true;
                 uploadBtn.textContent = "Please Wait...";

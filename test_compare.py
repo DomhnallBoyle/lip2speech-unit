@@ -1,5 +1,4 @@
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -7,10 +6,8 @@ import torch
 from jiwer import wer as calculate_wer
 from tqdm import tqdm
 
-sys.path.append('/home/domhnall/Repos/sv2s')
-from asr import WhisperASR
-from audio_utils import preprocess_audio
-from utils import get_viseme_distance, get_words_to_visemes_d, load_groundtruth_data
+import config
+from helpers import WhisperASR, get_viseme_distance, get_words_to_visemes_d, load_groundtruth_data, preprocess_audio
 
 
 def main(args):
@@ -49,7 +46,7 @@ def main(args):
                 preprocess_audio(
                     audio_path=l2s_audio_path, 
                     output_path=new_audio_path, 
-                    sr=16000
+                    sr=config.SAMPLING_RATE
                 )
                 l2s_audio_path = new_audio_path
 

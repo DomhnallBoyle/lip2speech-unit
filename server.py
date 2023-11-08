@@ -2,10 +2,10 @@ import argparse
 import collections
 import json
 import logging
+import os
 import pickle
 import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import time
@@ -23,25 +23,27 @@ import redis
 import requests
 import soundfile as sf
 import torch
-from flask import Flask, Response, g as app_context, redirect, render_template, request
+from flask import Flask, Response, g as app_context, redirect, render_template, request, send_from_directory
 from flask_socketio import SocketIO, emit
 from werkzeug.datastructures import FileStorage
+from werkzeug.exceptions import HTTPException
 
 import config
-from db import DB
 from create_dataset import manifests as create_manifests, vocoder as setup_vocoder_inference
-sys.path.append('/home/domhnall/Repos/sv2s')
-from asr import WhisperASR
-from audio_utils import preprocess_audio as post_process_audio
-from detector import filter_landmarks
-from face_landmarks_server import bytes_to_frame
-from utils import convert_fps, convert_video_codecs, get_fps, get_speaker_embedding, get_video_frames, overlay_audio
+from email_client import send_email
+from db import DB
+from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codecs, filter_landmarks, \
+    frame_to_bytes, get_fps, get_num_video_frames, _get_speaker_embedding, get_updated_dims, get_video_frames, \
+        get_video_size, is_valid_file, overlay_audio, preprocess_audio as post_process_audio, resize_video, save_video
+
+MAX_VIDEO_DURATION = config.MAX_GPU_DURATION if config.USING_GPU else config.MAX_VIDEO_DURATION
 
 device = torch.device('cuda:0' if config.USING_GPU else 'cpu')
 asr = WhisperASR(model='base.en', device=device)
+
 sem = threading.Semaphore()
 stream_sem = threading.Semaphore()
-speaker_embedding_lookup = {}
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] - %(message)s',
@@ -51,45 +53,10 @@ logging.basicConfig(
     ]
 )
 logging.info(f'Using: {device}')
+
+speaker_embedding_lookup = {}
 video_frames = []
 frame_dims = None
-
-
-def log_except_hook(*exc_info):
-    text = ''.join(traceback.format_exception(*exc_info))
-    logging.error(f'Unhandled exception: {text}') 
-
-
-sys.excepthook = log_except_hook
-
-
-def run_command(s):
-    subprocess.run(s, shell=True)
-
-
-def resize_video(video_path, width, height, output_video_path='/tmp/video_resized.mp4'):
-    run_command(f'ffmpeg -y -i {video_path} -vf scale="{width}:{height}" {output_video_path} -loglevel quiet')
-    shutil.copyfile(output_video_path, video_path)
-
-
-def get_video_size(video_path):
-    cap = cv2.VideoCapture(video_path)
-    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    cap.release()
-
-    return width, height
-
-
-def save_video(frames, video_path, fps, colour):
-    height, width = frames[0].shape[:2]
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-
-    video_writer = cv2.VideoWriter(video_path, fourcc, fps, (width, height), colour)
-    for frame in frames:
-        video_writer.write(frame.astype(np.uint8))
-
-    video_writer.release()
 
 
 def queue_encoded_frame(redis_cache, encoded_frame):
@@ -118,39 +85,13 @@ def dequeue_landmarks(redis_cache, max_frames_lambda):
     return video_landmarks
 
 
-def frame_to_bytes(frame):
-    return cv2.imencode('.jpg', frame)[1].tobytes()
-
-
 def get_landmarks(redis_cache, video_path):
-    video_frames = get_video_frames(video_path=video_path)
-
-    for frame in video_frames:
+    for i, frame in enumerate(get_video_frames(video_path=video_path)):
         queue_encoded_frame(redis_cache=redis_cache, encoded_frame=frame_to_bytes(frame))
 
-    max_frames = len(video_frames)
+    max_frames = i + 1
 
     return filter_landmarks(dequeue_landmarks(redis_cache=redis_cache, max_frames_lambda=lambda: max_frames))
-
-
-def show_frames(video_frames, face_landmarks):
-    for frame, landmarks in zip(video_frames, face_landmarks):
-        for x, y in landmarks:
-            frame = cv2.circle(frame, (int(x), int(y)), radius=0, color=(0, 0, 255), thickness=3)
-        cv2.imshow('Frame', frame)
-        cv2.waitKey(25)
-
-    cv2.destroyAllWindows()
-
-
-def get_updated_dims(width, height):
-    is_landscape = width > height
-    max_width, max_height = (config.DIM_1, config.DIM_2) if is_landscape else (config.DIM_2, config.DIM_1)
-
-    if width > max_width or height > max_height:
-        return max_width, max_height
-
-    return width, height
 
 
 def execute_request(name, r, *args, **kwargs):
@@ -167,18 +108,6 @@ def execute_request(name, r, *args, **kwargs):
     return response
 
 
-def _get_speaker_embedding(audio_path):
-    start_time = time.time()
-    speaker_embedding = get_speaker_embedding(audio_path=audio_path)
-    time_taken = round(time.time() - start_time, 2)
-    logging.info(f'Extracting speaker embedding took {time_taken} secs')
-
-    speaker_embedding = np.asarray(speaker_embedding, dtype=np.float32)
-    assert speaker_embedding.shape == (256,) and speaker_embedding.dtype == np.float32
-
-    return speaker_embedding
-
-
 def setup(args, args_path):
     assert args or args_path, 'Args required'
 
@@ -191,6 +120,7 @@ def setup(args, args_path):
     assert len(args.audio_paths) > 0, f'Audio paths required'
     assert len(args.audio_paths) == len(set(args.audio_paths)), f'Non-unique audio paths'
     assert 'web_client_run_asr' in args.__dict__
+    assert 'web_client_streaming' in args.__dict__
     assert 'prod' in args.__dict__
 
     # setup static and server directories
@@ -244,17 +174,17 @@ def create_app(args=None, args_path=None):
     socketio = SocketIO(app, serializer='msgpack')
     cache = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT)
 
-    def _synthesise(name, checkpoint_id, audio_file, face_landmarks=None, run_asr=True):
+    def _synthesise(uid, checkpoint_id, audio_file, face_landmarks=None, run_asr=True):
         # acquire lock
         sem.acquire()
 
-        video_upload_path = str(config.INPUTS_PATH.joinpath(f'{name}.mp4'))
-        audio_upload_path = str(config.INPUTS_PATH.joinpath(f'{name}.wav'))
-        video_raw_path = str(config.VIDEO_RAW_DIRECTORY.joinpath(f'{name}.mp4'))
-        video_landmarks_path = str(config.LANDMARKS_DIRECTORY.joinpath(f'{name}.pkl'))
-        audio_path = str(config.AUDIO_DIRECTORY.joinpath(f'{name}.wav'))
-        pred_audio_path = str(config.VOCODER_DIRECTORY.joinpath(f'pred_wav/{config.TYPE}/{name}.wav'))
-        video_download_path = str(config.STATIC_PATH.joinpath(f'{name}.mp4'))
+        video_upload_path = str(config.INPUTS_PATH.joinpath(f'{uid}.mp4'))
+        audio_upload_path = str(config.INPUTS_PATH.joinpath(f'{uid}.wav'))
+        video_raw_path = str(config.VIDEO_RAW_DIRECTORY.joinpath(f'{uid}.mp4'))
+        video_landmarks_path = str(config.LANDMARKS_DIRECTORY.joinpath(f'{uid}.pkl'))
+        audio_path = str(config.AUDIO_DIRECTORY.joinpath(f'{uid}.wav'))
+        pred_audio_path = str(config.VOCODER_DIRECTORY.joinpath(f'pred_wav/{config.TYPE}/{uid}.wav'))
+        video_download_path = str(config.STATIC_PATH.joinpath(f'{uid}.mp4'))
 
         # setup directory
         if config.WORKING_DIRECTORY.exists():
@@ -262,6 +192,16 @@ def create_app(args=None, args_path=None):
         for d in [config.WORKING_DIRECTORY, config.VIDEO_RAW_DIRECTORY, config.AUDIO_DIRECTORY, config.VIDEO_DIRECTORY, 
                 config.MEL_SPEC_DIRECTORY, config.SPK_EMB_DIRECTORY, config.LANDMARKS_DIRECTORY, config.LABEL_DIRECTORY]:
             d.mkdir(parents=True)
+
+        # optional model checkpoint id
+        response = execute_request('LOAD CHECKPOINT', requests.post, 'http://127.0.0.1:5004/load_checkpoint', json={'checkpoint_id': checkpoint_id})
+        if response.status_code != HTTPStatus.NO_CONTENT:
+            return {'message': 'Failed to load checkpoint'}, HTTPStatus.INTERNAL_SERVER_ERROR
+
+        # check uploaded files are valid
+        for p, stream in zip([video_upload_path, audio_upload_path], ['video', 'audio']):
+            if Path(p).exists() and not is_valid_file(p, select_stream=stream):
+                return {'message': f'Uploaded {stream} file is not valid'}, HTTPStatus.BAD_REQUEST
 
         # convert size if applicable to prevent GPU memory overload
         if config.USING_GPU:
@@ -277,17 +217,65 @@ def create_app(args=None, args_path=None):
         else:
             shutil.copyfile(video_upload_path, video_raw_path)
 
-        num_video_frames = len(get_video_frames(video_path=video_raw_path))
+        num_video_frames = get_num_video_frames(video_path=video_raw_path)
         video_duration = num_video_frames / config.FPS
 
         # check video duration
-        if config.USING_GPU and video_duration > config.MAX_GPU_DURATION:
-            return {'message': f'Video too long, must be <= {config.MAX_GPU_DURATION} seconds'}, HTTPStatus.BAD_REQUEST
+        if video_duration > MAX_VIDEO_DURATION:
+            return {'message': f'Video too long, must be <= {MAX_VIDEO_DURATION} seconds'}, HTTPStatus.BAD_REQUEST
 
-        # optional model checkpoint id
-        response = execute_request('LOAD CHECKPOINT', requests.post, 'http://127.0.0.1:5004/load_checkpoint', json={'checkpoint_id': checkpoint_id})
-        if response.status_code != HTTPStatus.NO_CONTENT:
-            return {'message': 'Failed to load checkpoint'}, HTTPStatus.INTERNAL_SERVER_ERROR
+        # get speaker embedding
+        logging.info(f'Getting speaker embedding from "{audio_file.filename}"')
+        speaker_embedding = speaker_embedding_lookup.get(audio_file.filename)
+        if speaker_embedding is None:
+            logging.info('Preloaded embedding doesn\'t exist, retrieving new embedding...')
+            try:
+                start_time = time.time()
+                speaker_embedding = _get_speaker_embedding(audio_path=audio_upload_path)
+                time_taken = round(time.time() - start_time, 2)
+                logging.info(f'Extracting speaker embedding took {time_taken} secs')
+            except requests.exceptions.ConnectionError:
+                return {'message': 'Speaker embedding server not available'}, HTTPStatus.INTERNAL_SERVER_ERROR
+        np.save(config.SPK_EMB_DIRECTORY.joinpath(f'{uid}.npy'), speaker_embedding)
+
+        # create file.list for extracting mouth frames
+        with open(config.WORKING_DIRECTORY.joinpath(f'{config.TYPE}_file.list'), 'w') as f:
+            f.write(f'{config.TYPE}/{uid}\n')
+
+        # get face landmarks
+        # NOTE: if multiple people in the frame, POI is decided by maximum bb in the frame
+        start_time = time.time()
+        face_landmarks = face_landmarks if face_landmarks is not None else get_landmarks(redis_cache=cache, video_path=video_raw_path)
+        time_taken = round(time.time() - start_time, 2)
+        logging.info(f'Extracting face landmarks took {time_taken} secs')
+
+        # deal with frames where face/landmarks not detected
+        try:
+            valid_face_landmark_indices, face_landmarks = zip(*[
+                (i, l) for i, l in enumerate(face_landmarks) 
+                if l is not None
+            ])
+        except ValueError:
+            # unpack error - no faces detected in video
+            return {'message': 'Failed to detect any faces'}, HTTPStatus.BAD_REQUEST
+        
+        face_landmarks = list(face_landmarks)
+        num_valid_face_landmarks = len(valid_face_landmark_indices)
+
+        # exclude non-detected frames
+        if num_valid_face_landmarks != num_video_frames:
+            logging.info(f'Failed to detect landmarks in some frames, excluding them')
+            video_frames = list(get_video_frames(video_path=video_raw_path))
+            video_frames = [video_frames[i] for i in valid_face_landmark_indices]
+            num_video_frames = len(video_frames)
+            video_duration = num_video_frames / config.FPS
+            save_video(video_frames, video_raw_path, config.FPS, colour=True)
+
+        assert num_valid_face_landmarks == num_video_frames
+
+        # save face landmarks
+        with open(video_landmarks_path, 'wb') as f:
+            pickle.dump(face_landmarks, f)
 
         # extract audio
         num_audio_frames = int(video_duration * config.SAMPLING_RATE)
@@ -296,32 +284,7 @@ def create_app(args=None, args_path=None):
 
         # extract mel spec
         mel = np.random.rand(80, 100).astype(np.float32).T
-        np.save(config.MEL_SPEC_DIRECTORY.joinpath(f'{name}.npy'), mel)
-
-        # get speaker embedding
-        logging.info(f'Getting speaker embedding from "{audio_file.filename}"')
-        speaker_embedding = speaker_embedding_lookup.get(audio_file.filename)
-        if speaker_embedding is None:
-            logging.info('Preloaded embedding doesn\'t exist, retrieving new embedding...')
-            try:
-                speaker_embedding = _get_speaker_embedding(audio_path=audio_upload_path)
-            except requests.exceptions.ConnectionError:
-                return {'message': 'Speaker embedding server not available'}, HTTPStatus.INTERNAL_SERVER_ERROR
-        np.save(config.SPK_EMB_DIRECTORY.joinpath(f'{name}.npy'), speaker_embedding)
-
-        # create file.list for extracting mouth frames
-        with open(config.WORKING_DIRECTORY.joinpath(f'{config.TYPE}_file.list'), 'w') as f:
-            f.write(f'{config.TYPE}/{name}\n')
-
-        # get face landmarks
-        start_time = time.time()
-        face_landmarks = face_landmarks if face_landmarks is not None else get_landmarks(redis_cache=cache, video_path=video_raw_path)
-        time_taken = round(time.time() - start_time, 2)
-        logging.info(f'Extracting face landmarks took {time_taken} secs')
-        if any([l is None for l in face_landmarks]):
-            return {'message': 'Failed to detect face landmarks'}, HTTPStatus.BAD_REQUEST
-        with open(video_landmarks_path, 'wb') as f:
-            pickle.dump(face_landmarks, f)
+        np.save(config.MEL_SPEC_DIRECTORY.joinpath(f'{uid}.npy'), mel)
 
         # extract mouth frames
         response = execute_request('MOUTH FRAMES', requests.post, 'http://127.0.0.1:5003/extract_mouth_frames', json={'root': str(config.WORKING_DIRECTORY)})
@@ -380,7 +343,7 @@ def create_app(args=None, args_path=None):
         # log results in the db
         with DB(config.DB_PATH) as cur:
             usage_id = str(uuid.uuid4())
-            video_id = name
+            video_id = uid
             model_id = cur.execute(f'SELECT id FROM model WHERE name=\'{checkpoint_id}\'').fetchone()[0]
             audio_id_row = cur.execute(f'SELECT id FROM audio WHERE name=\'{audio_file.filename}\'').fetchone()
             audio_id = audio_id_row[0] if audio_id_row else None
@@ -389,7 +352,7 @@ def create_app(args=None, args_path=None):
                 cur.execute('INSERT INTO asr_transcription (id, usage_id, transcription) values (?, ?, ?)', (str(uuid.uuid4()), usage_id, asr_preds[0]))
 
         return {
-            'videoId': name,
+            'videoId': uid,
             'asrPredictions': asr_preds
         }, HTTPStatus.OK
 
@@ -436,9 +399,9 @@ def create_app(args=None, args_path=None):
 
         logging.info('Client end stream; running synthesis...')
 
-        name = str(uuid.uuid4())
-        video_upload_path = str(config.INPUTS_PATH.joinpath(f'{name}.mp4'))
-        audio_upload_path = str(config.INPUTS_PATH.joinpath(f'{name}.wav'))
+        uid = str(uuid.uuid4())
+        video_upload_path = str(config.INPUTS_PATH.joinpath(f'{uid}.mp4'))
+        audio_upload_path = str(config.INPUTS_PATH.joinpath(f'{uid}.wav'))
 
         # NOTE: audio_stream is bytes object
         audio_file = FileStorage(filename='speaker_audio_1.wav')
@@ -475,7 +438,7 @@ def create_app(args=None, args_path=None):
         save_video(frames=_video_frames, video_path=video_upload_path, fps=config.FPS, colour=True)
 
         response = _synthesise(
-            name=name,
+            uid=uid,
             checkpoint_id=checkpoint_id,
             audio_file=audio_file,
             face_landmarks=face_landmarks,
@@ -505,33 +468,51 @@ def create_app(args=None, args_path=None):
         logging.info(f'{request.method} {request.path} {dict(request.args)} {response.status_code} - {time_taken} secs')
 
         return response
+    
+    @app.errorhandler(Exception)
+    def exception_handler(error):
+        if isinstance(error, HTTPException):
+            return error
+        
+        logging.error(f'Unhandled Exception: {traceback.format_exc()}')
+
+        return {'message': 'Something went wrong...'}, HTTPStatus.INTERNAL_SERVER_ERROR
+
+    @app.route('/cdn/<file_name>')
+    def custom_static(file_name):
+        return send_from_directory(config.WEB_STATIC_PATH, file_name)
 
     @app.get('/demo')
     def demo():
-        return render_template('index.html', **{
+        return render_template('demo.html', **{
             'audio_paths': args.audio_paths,
-            'checkpoint_ids': checkpoint_ids, 
-            'web_client_run_asr': int(args.web_client_run_asr)
+            'checkpoint_ids': checkpoint_ids,
+            'web_client_run_asr': int(args.web_client_run_asr),
+            'web_client_streaming': args.web_client_streaming
         })
 
     @app.post('/synthesise')
     def synthesise():
-        name = str(uuid.uuid4())
-        video_upload_path = str(config.INPUTS_PATH.joinpath(f'{name}.mp4'))
-        audio_upload_path = str(config.INPUTS_PATH.joinpath(f'{name}.wav'))
+        uid = str(uuid.uuid4())
+        video_upload_path = str(config.INPUTS_PATH.joinpath(f'{uid}.mp4'))
+        audio_upload_path = str(config.INPUTS_PATH.joinpath(f'{uid}.wav'))
 
         # required video file
+        start_time = time.time()
         video_file = request.files['video']
         video_file.save(video_upload_path)
+        time_taken = round(time.time() - start_time, 2)
+        logging.info(f'Video save took {time_taken} secs')
 
         # optional audio file for speaker embedding
-        audio_file = FileStorage(filename='speaker_audio_1.wav')  # default speaker embedding
-        if 'audio' in request.files:
-            audio_file = request.files['audio']
+        audio_file = request.files.get('audio')
+        if audio_file:
             audio_file.save(audio_upload_path)
+        else:
+            audio_file = FileStorage(filename='speaker_audio_1.wav')  # default speaker embedding
 
         response = _synthesise(
-            name=name,
+            uid=uid,
             checkpoint_id=request.form.get('checkpoint_id', 'base'),
             audio_file=audio_file,
             run_asr=bool(int(request.args.get('asr', 1)))
@@ -546,6 +527,83 @@ def create_app(args=None, args_path=None):
     def get_video(video_id):
         return redirect(f'/static/{video_id}.mp4')
 
+    @app.get('/vsg')
+    def vsg():
+        return render_template('vsg.html')
+    
+    @app.post('/dzupload')
+    def upload():
+        upload_id = request.args['id']
+        file = request.files['file']
+        upload_path = str(config.INPUTS_PATH.joinpath(f'{upload_id}_{file.filename}'))
+
+        with open(upload_path, 'ab') as f:
+            f.seek(int(request.form['dzchunkbyteoffset']))
+            f.write(file.stream.read())
+
+        current_chunk = int(request.form['dzchunkindex'])
+        total_chunks = int(request.form['dztotalchunkcount'])
+
+        if current_chunk + 1 == total_chunks:
+            total_file_size = int(request.form['dztotalfilesize'])
+            if os.path.getsize(upload_path) != total_file_size:
+                return {'message': 'File size mismatch'}, HTTPStatus.INTERNAL_SERVER_ERROR
+
+        return {'message': 'Chunk uploaded successfully'}, HTTPStatus.OK
+
+    @app.post('/vsg/synthesise')
+    def vsg_synthesise():
+        # required email and upload id
+        email = request.form['email']
+        upload_id = request.form['uploadId']
+
+        # get uploaded files
+        uploaded_file_paths = [str(p) for p in config.INPUTS_PATH.glob(f'{upload_id}_*')]
+        num_uploaded_files = len(uploaded_file_paths)
+
+        # SCENARIOS:
+        # - Uploaded 1 file - ensure is video file
+        # - Uploaded 2 files - ensure 1 is video and the other is audio
+        if num_uploaded_files == 1:
+            video_path = uploaded_file_paths[0]
+            if not is_valid_file(file_path=video_path, select_stream='video'):
+                return {'message': 'Please upload a valid video file'}, HTTPStatus.BAD_REQUEST
+            
+            audio_path = 'static/speaker_audio_1.wav'
+        elif num_uploaded_files == 2:
+            video_path = None
+            for i, p in enumerate(uploaded_file_paths):
+                if is_valid_file(file_path=p, select_stream='video'):
+                    video_path = p
+                    break
+
+            if video_path is None:
+                return {'message': 'Please upload a valid video file'}, HTTPStatus.BAD_REQUEST
+            
+            audio_path = uploaded_file_paths[i - 1]  # -ve indexing, i = 0 (-1), i = 1 (0)
+            if not is_valid_file(file_path=audio_path, select_stream='audio'):
+                return {'message': 'The uploaded audio file is invalid'}, HTTPStatus.BAD_REQUEST
+        else:
+            return {'message': 'Too many files uploaded; upload a video and audio (optional)'}, HTTPStatus.BAD_REQUEST
+
+        # push request to redis cache
+        cache.rpush(config.REDIS_SERVICE_QUEUE, json.dumps({
+            'url': request.host_url,
+            'uid': upload_id,
+            'video_path': video_path,
+            'audio_path': audio_path
+        }))
+
+        # notify liopa personnel of request
+        send_email(
+            sender=config.EMAIL_USERNAME,
+            receivers=config.EMAIL_RECEIVERS,
+            subject=f'VSG Service Request - {upload_id}',
+            content=f'{email} has requested to use the VSG service.\nThe uploaded video and audio paths are located in {video_path} and {audio_path} respectively.'
+        )
+
+        return {'message': 'Your request has been submitted successfully\nKeep checking your email for updates'}, HTTPStatus.OK
+
     logging.info('Ready for requests...')
 
     if args.prod:
@@ -558,6 +616,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('audio_paths', type=lambda s: s.split(','))
     parser.add_argument('--web_client_run_asr', action='store_true')
+    parser.add_argument('--web_client_streaming', action='store_true')
     parser.add_argument('--prod', action='store_true')
     parser.add_argument('--port', type=int, default=5002)
     parser.add_argument('--debug', action='store_true')

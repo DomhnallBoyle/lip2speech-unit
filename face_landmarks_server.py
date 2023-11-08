@@ -1,20 +1,10 @@
 import json
-import sys
 import time
 
-import cv2
-import numpy as np
 import redis
 
 import config
-sys.path.append('/home/domhnall/Repos/sv2s')
-from detector import get_face_landmarks
-
-WAIT_TIME = 0.01
-
-
-def bytes_to_frame(encoded_frame):
-    return cv2.imdecode(np.frombuffer(encoded_frame, dtype=np.uint8), cv2.IMREAD_COLOR)
+from helpers import bytes_to_frame, get_face_landmarks
 
 
 def main():
@@ -29,8 +19,7 @@ def main():
     while True: 
         encoded_frame = cache.lpop(config.REDIS_FRAME_QUEUE)
         if not encoded_frame:
-            print('Waiting...')
-            time.sleep(WAIT_TIME)
+            time.sleep(config.REDIS_WAIT_TIME)
             continue
     
         frame = bytes_to_frame(encoded_frame=encoded_frame)

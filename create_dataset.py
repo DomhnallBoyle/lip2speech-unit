@@ -13,20 +13,11 @@ import soundfile as sf
 import torch
 from tqdm import tqdm
 
-sys.path.extend(['/home/domhnall/Repos/sv2s', '/home/domhnall/Repos/fairseq'])
-from audio_utils import preprocess_audio
-from detector import get_face_landmarks
-from utils import convert_fps, crop_video, get_fps, get_video_duration, get_video_frames, split_list
-from examples.textless_nlp.gslm.unit2speech.tacotron2.layers import TacotronSTFT
+import config
 
-FILTER_LENGTH = 640
-HOP_LENGTH = 160
-WIN_LENGTH = 640
-NUM_MEL_CHANNELS = 80
-SAMPLING_RATE = 16000
-MEL_FMIN = 0.0
-MEL_FMAX = 8000.0
-FPS = 25
+sys.path.append(str(config.FAIRSEQ_PATH))
+from helpers import convert_fps, crop_video, extract_audio, get_face_landmarks, get_fps, get_num_video_frames, get_video_duration, preprocess_audio, split_list
+from examples.textless_nlp.gslm.unit2speech.tacotron2.layers import TacotronSTFT
 
 stft = None
 
@@ -36,8 +27,8 @@ stft = None
 
 def trim_video_to_duration(video_path, cropped_video_path='/tmp/video_cropped.mp4'):
     # fix duration issue where ffprobe duration doesn't match no. frames and fps
-    num_video_frames = len(get_video_frames(video_path))
-    video_duration = num_video_frames / FPS
+    num_video_frames = get_num_video_frames(video_path=video_path)
+    video_duration = num_video_frames / config.FPS
 
     if video_duration != get_video_duration(video_path):
         crop_video(video_path, 0, video_duration, cropped_video_path)
@@ -48,33 +39,28 @@ def trim_video_to_duration(video_path, cropped_video_path='/tmp/video_cropped.mp
 
 def crop_to_random_duration(video_path, num_video_frames, video_duration, max_duration, cropped_video_path='/tmp/video_cropped.mp4'):
     if video_duration > max_duration:
-        duration_num_frames = random.randint(1 * FPS, max_duration * FPS)
+        duration_num_frames = random.randint(1 * config.FPS, max_duration * config.FPS)
         frame_start_index = random.randint(0, (num_video_frames - duration_num_frames) - 1)
         frame_end_index = frame_start_index + duration_num_frames
-        start_duration = frame_start_index / FPS
-        end_duration = frame_end_index / FPS
+        start_duration = frame_start_index / config.FPS
+        end_duration = frame_end_index / config.FPS
 
         crop_video(video_path, start_duration, end_duration, cropped_video_path)
         shutil.copyfile(cropped_video_path, video_path)
 
 
-def extract_audio(video_path, audio_path):
-    command = f'ffmpeg -i {video_path} -f wav -vn -y -ac 1 -ar {SAMPLING_RATE} {audio_path} -loglevel quiet'
-    subprocess.run(command, shell=True)
-
-
 def extract_mel_spec(audio_path):
     global stft
     if stft is None:
-        stft = TacotronSTFT(filter_length=FILTER_LENGTH, hop_length=HOP_LENGTH, win_length=WIN_LENGTH,
-                            n_mel_channels=NUM_MEL_CHANNELS, sampling_rate=SAMPLING_RATE, mel_fmin=MEL_FMIN,
-                            mel_fmax=MEL_FMAX)
+        stft = TacotronSTFT(filter_length=config.FILTER_LENGTH, hop_length=config.HOP_LENGTH, win_length=config.WIN_LENGTH,
+                            n_mel_channels=config.NUM_MEL_CHANNELS, sampling_rate=config.SAMPLING_RATE, mel_fmin=config.MEL_FMIN,
+                            mel_fmax=config.MEL_FMAX)
 
     audio, sr = sf.read(audio_path)
-    assert sr == SAMPLING_RATE
+    assert sr == config.SAMPLING_RATE
     audio = torch.from_numpy(audio).unsqueeze(0).float()
     mel = stft.mel_spectrogram(audio)[0].numpy()
-    assert mel.shape[0] == NUM_MEL_CHANNELS and mel.dtype == np.float32
+    assert mel.shape[0] == config.NUM_MEL_CHANNELS and mel.dtype == np.float32
 
     return mel.T
 
@@ -108,8 +94,8 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
 
         # copy raw video or convert fps if necessary
         raw_video_path = str(args.video_raw_directory.joinpath(f'{name}.mp4'))
-        if get_fps(video_path) != FPS:
-            convert_fps(video_path, FPS, raw_video_path)
+        if get_fps(video_path) != config.FPS:
+            convert_fps(video_path, config.FPS, raw_video_path)
         else:
             shutil.copyfile(video_path, raw_video_path)
         video_path = raw_video_path

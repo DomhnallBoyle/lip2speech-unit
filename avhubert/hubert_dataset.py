@@ -64,8 +64,10 @@ def load_audio_visual(manifest_path, max_keep, min_keep, frame_rate, label_paths
             items = line.strip().split("\t")
             sz = int(items[-2]) # 
             if min_keep is not None and sz < min_keep:
+                print(f'{sz} < {min_keep}')
                 n_short += 1
             elif max_keep is not None and sz > max_keep:
+                print(f'{sz} > {max_keep}')
                 n_long += 1
             elif (not is_seq_label) and (not is_audio_label_aligned(sz/frame_rate, dur_from_label_list[ind])):
                 video_dur = sz / frame_rate

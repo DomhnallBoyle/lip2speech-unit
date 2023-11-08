@@ -1,0 +1,154 @@
+
+<!DOCTYPE html>
+    <head>
+        <title>VSG</title>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/dropzone/5.9.3/min/dropzone.min.css"/>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/dropzone/5.9.3/min/basic.min.css"/>
+        <script type="application/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/dropzone/5.9.3/min/dropzone.min.js"></script>
+        <script type="application/javascript" src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    </head>
+
+    <body>
+        <h2><u>Visual Speech Generator:</u></h2>
+
+        <div id="notes">
+            <h3>Notes:</h3>
+            <ul>
+                <li>Upload a video that contains lip-movements that you wish to generate audio for</li>
+                <li>If you wish to generate audio in a specific voice, you can upload an audio file too</li>
+                <li>When completed, a link will be emailed to you where you can retrieve the video with overlayed audio</li>
+            </ul>
+        </div>
+
+        <hr><br>
+
+        <form id="upload-form" class="dropzone">
+            <input id="email" type="email" placeholder="Enter email..."/><br><br>
+            <div class="previews"></div>
+            <button id="generate" type="submit">Generate</button>
+        </form>
+        
+    </body>
+
+    <style>
+        body {
+            padding: 0px 20px 0px 20px;
+        }
+
+        input[type=email] {
+            width: 250px;
+        }
+
+        .dz-success-mark svg g path {
+            fill: green;
+        }
+
+        .dz-error-mark svg g path {
+            fill: red;
+        }
+
+        .dz-error-message span {
+            color: black;
+        }
+    </style>
+
+    <script>
+        "use strict";
+
+        const generateBtn = document.getElementById("generate");
+
+        var uploadId = uuidv4();
+        var uploadURL = "/dzupload?id=" + uploadId;
+        var emailAddress;
+        var myDropzone;
+
+        function uuidv4() {
+            return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c =>
+                (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+            );
+        }
+
+        Dropzone.options.uploadForm = {
+
+            url: uploadURL,
+            method: "post",
+            paramName: "file",
+            chunking: true,
+            forceChunking: true,
+            chunkSize: 1000000, // 1 MB
+            autoProcessQueue: false,
+            maxFiles: 2,
+            dictDefaultMessage: "Drop you video and audio (optional) files here to upload",
+            renameFile: function (file) {
+                return uuidv4();
+            },
+
+            init: function() {
+                myDropzone = this;
+
+                this.element.querySelector("button[type=submit]").addEventListener("click", function(e) {
+                    // make sure that the form isn't actually being sent.
+                    e.preventDefault();
+                    e.stopPropagation();
+
+                    emailAddress = document.getElementById("email").value;
+                    if (!validateEmail(emailAddress)) {
+                        fireToast("Please enter a valid email address", "error");
+                        return;
+                    }
+
+                    if (myDropzone.files.length == 0) {
+                        fireToast("Please upload some files", "error");
+                        return;
+                    }
+
+                    myDropzone.processQueue();
+                });
+
+                this.on("queuecomplete", function (file) {
+                    sendForm(email);
+                });
+            }
+        };
+
+        function sendForm() {
+            // construct form data
+            var formData = new FormData();
+            formData.append("email", emailAddress);
+            formData.append("uploadId", uploadId);
+
+            var xhr = new XMLHttpRequest();
+            xhr.addEventListener("load", function(event) {
+                handleResponse(xhr.status, xhr.response["message"]);
+            });
+            xhr.open("POST", "/vsg/synthesise");
+            xhr.responseType = "json";
+            xhr.send(formData);
+        }
+
+        function handleResponse(statusCode, responseText) {
+            if (statusCode != 200) {
+                fireToast(responseText, "error");
+                myDropzone.removeAllFiles();
+                uploadId = uuidv4();  // reset upload ID and dropzone URL
+                myDropzone.options.url = "/dzupload?id=" + uploadId;
+                return;
+            }
+            fireToast(responseText, "success");
+            generateBtn.disabled = true;
+        }
+
+        function fireToast(text, icon) {
+            Swal.fire({
+                title: "VSG",
+                text: text,
+                icon: icon
+            });
+        }
+
+        function validateEmail(email) {
+            var re = /\S+@\S+\.\S+/;
+            return re.test(email);
+        }
+    </script>
+</html>
