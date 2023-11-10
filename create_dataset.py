@@ -16,7 +16,7 @@ from tqdm import tqdm
 import config
 
 sys.path.append(str(config.FAIRSEQ_PATH))
-from helpers import convert_fps, crop_video, extract_audio, get_face_landmarks, get_fps, get_num_video_frames, get_video_duration, preprocess_audio, split_list
+from helpers import convert_fps, crop_video, extract_audio, get_face_landmarks, get_fps, get_num_video_frames, get_video_duration, init_facial_detectors, preprocess_audio, split_list
 from examples.textless_nlp.gslm.unit2speech.tacotron2.layers import TacotronSTFT
 
 stft = None
@@ -68,6 +68,9 @@ def extract_mel_spec(audio_path):
 def init_process(process_index, args, sample_paths, already_processed, to_process):
     cropped_video_path = f'/tmp/video_cropped_{process_index}.mp4'
     preprocessed_audio_path = f'/tmp/preprocessed_audio_{process_index}.wav'
+
+    if args.use_new_landmark_detector:
+        init_facial_detectors()
 
     for sample_path in tqdm(sample_paths):
         if str(sample_path) in already_processed:

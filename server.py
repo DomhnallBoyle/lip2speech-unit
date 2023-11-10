@@ -33,8 +33,13 @@ from create_dataset import manifests as create_manifests, vocoder as setup_vocod
 from email_client import send_email
 from db import DB
 from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codecs, filter_landmarks, \
-    frame_to_bytes, get_fps, get_num_video_frames, _get_speaker_embedding, get_updated_dims, get_video_frames, \
-        get_video_size, is_valid_file, overlay_audio, preprocess_audio as post_process_audio, resize_video, save_video
+    get_fps, get_num_video_frames, _get_speaker_embedding, get_updated_dims, get_video_frames, get_video_size, \
+        is_valid_file, overlay_audio, preprocess_audio as post_process_audio, resize_video, save_video
+
+# TODO: 
+# resize video anyway regardless of using GPU or not - might help speed up detector/predictor?
+# record in db the vsg service usages
+# think about how stats will work, where will videos be saved etc
 
 MAX_VIDEO_DURATION = config.MAX_GPU_DURATION if config.USING_GPU else config.MAX_VIDEO_DURATION
 
@@ -59,11 +64,13 @@ video_frames = []
 frame_dims = None
 
 
-def queue_encoded_frame(redis_cache, encoded_frame):
-    redis_cache.rpush(config.REDIS_FRAME_QUEUE, encoded_frame)
+def queue_frame(redis_cache, frame_index, frame):
+    item = (frame_index, frame)
+    redis_cache.rpush(config.REDIS_FRAME_QUEUE, pickle.dumps(item))
 
 
 def dequeue_landmarks(redis_cache, max_frames_lambda):
+    frame_indexes = []
     video_landmarks = collections.defaultdict(list)
     i = 0
     while i < max_frames_lambda():
@@ -71,27 +78,37 @@ def dequeue_landmarks(redis_cache, max_frames_lambda):
         if not item:
             continue
 
-        frame_landmarks = json.loads(item)
+        frame_index, frame_landmarks = pickle.loads(item)
 
+        frame_indexes.append(frame_index)
         video_landmarks['bbox'].extend(frame_landmarks['bbox'])
         video_landmarks['landmarks'].extend(frame_landmarks['landmarks'])
         video_landmarks['landmarks_scores'].extend(frame_landmarks['landmarks_scores'])
 
         i += 1
 
+    # order landmarks correctly
+    sorted_indexes = np.argsort(frame_indexes)
+    for v in video_landmarks.values():
+        v = np.asarray(v)[sorted_indexes].tolist()
+
     num_frames = len(video_landmarks['landmarks'])
     assert num_frames == max_frames_lambda(), f'{num_frames} landmarks != {max_frames_lambda()} frames'
 
-    return video_landmarks
+    return filter_landmarks(video_landmarks), sorted_indexes
 
 
 def get_landmarks(redis_cache, video_path):
+    # reset queues
+    for q in [config.REDIS_FRAME_QUEUE, config.REDIS_LANDMARK_QUEUE]:
+        redis_cache.delete(q) 
+
     for i, frame in enumerate(get_video_frames(video_path=video_path)):
-        queue_encoded_frame(redis_cache=redis_cache, encoded_frame=frame_to_bytes(frame))
+        queue_frame(redis_cache=redis_cache, frame_index=i, frame=frame)
 
     max_frames = i + 1
 
-    return filter_landmarks(dequeue_landmarks(redis_cache=redis_cache, max_frames_lambda=lambda: max_frames))
+    return dequeue_landmarks(redis_cache=redis_cache, max_frames_lambda=lambda: max_frames)[0]
 
 
 def execute_request(name, r, *args, **kwargs):
@@ -314,6 +331,7 @@ def create_app(args=None, args_path=None):
             return {'message': 'Failed to run vocoder'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         # post-processing audio - denoise and normalise
+        start_time = time.time()
         post_process_audio(
             audio_path=pred_audio_path,
             output_path=str(config.POST_PROCESSED_AUDIO_PATH),
@@ -331,6 +349,8 @@ def create_app(args=None, args_path=None):
             audio_codec='aac',
             output_video_path=video_download_path
         )
+        time_taken = round(time.time() - start_time, 2)
+        logging.info(f'Post-processing took {time_taken} secs')
 
         # get asr results - on by default
         asr_preds = []
@@ -386,11 +406,10 @@ def create_app(args=None, args_path=None):
 
             if frame_dims != (width, height):
                 frame = cv2.resize(frame, frame_dims)  # (width, height)
-                encoded_frame = frame_to_bytes(frame)
 
-        queue_encoded_frame(redis_cache=cache, encoded_frame=encoded_frame)
-        video_frames.append([frame_index, frame])
-        
+        queue_frame(redis_cache=cache, frame_index=frame_index, frame=frame)
+        video_frames.append(frame)
+
         emit('response', f'frame {len(video_frames)} received')
 
     @socketio.on('end_stream')
@@ -418,22 +437,17 @@ def create_app(args=None, args_path=None):
                 audio_file.filename = audio_name
 
         # max frames keeps growing as lambda is executed constantly in loop
-        face_landmarks = dequeue_landmarks(redis_cache=cache, max_frames_lambda=lambda: len(video_frames))
-        
+        face_landmarks, sorted_indexes = dequeue_landmarks(redis_cache=cache, max_frames_lambda=lambda: len(video_frames))
+
         # TODO:
         #  fix error: server=127.0.0.1:5002//socket.io/ client=127.0.0.1:58606 socket shutdown error: [Errno 9] Bad file descriptor
         #  seems to be because of bad disconnect from the client side?
         #  "disconnect" is called on server side anyway - stream semaphore is released too
 
-        # frames can arrive in a random order, need to sort them and landmarks accordingly
-        # only then can you filter the landmarks
-        assert len(video_frames) == len(face_landmarks['landmarks'])
-        unsorted_frame_indexes, unsorted_frames = zip(*video_frames)
-        sorted_indexes = np.argsort(unsorted_frame_indexes)
+        # frames can arrive in a random order, need to sort them based on sorted landmark indices
+        assert len(video_frames) == len(face_landmarks)
+        unsorted_frames = video_frames
         _video_frames = np.asarray(unsorted_frames)[sorted_indexes]
-        for v in face_landmarks.values():
-            v = np.asarray(v)[sorted_indexes].tolist()
-        face_landmarks = filter_landmarks(landmarks=face_landmarks)
 
         save_video(frames=_video_frames, video_path=video_upload_path, fps=config.FPS, colour=True)
 

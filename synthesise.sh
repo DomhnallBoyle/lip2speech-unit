@@ -1,3 +1,4 @@
+#!/bin/bash
 label_dir=$1
 results_path=$2
 checkpoint_path=$3

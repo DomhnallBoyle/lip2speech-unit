@@ -1,7 +1,9 @@
+#!/bin/bash
 cuda_devices=${CUDA_DEVICES:-0}
 backend=${BACKEND:-1}
 prod=${PROD:-0}
 daemon=${DAEMON:-0}
+num_landmark_servers=${NUM_LANDMARK_SERVERS:-1}
 
 working_dir=/tmp/lip2speech
 avhubert_env=/home/domhnall/Envs/avhubert/bin/activate
@@ -24,7 +26,13 @@ export EMAIL_USERNAME=$email_username
 export EMAIL_PASSWORD=$email_password
 
 if [[ $backend -eq 1 ]]; then
-    . $lip2speech_env && nohup python face_landmarks_server.py >/dev/null 2>&1 &
+
+    # multiple landmark servers
+    for i in $(seq 1 $num_landmark_servers)
+    do
+        . $lip2speech_env && nohup python face_landmarks_server.py >/dev/null 2>&1 &
+        sleep 10;
+    done
 
     # face landmark detection should always use GPU
     export CUDA_VISIBLE_DEVICES=$cuda_devices

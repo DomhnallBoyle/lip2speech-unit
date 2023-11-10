@@ -1,3 +1,4 @@
+#!/bin/bash
 root=$1
 type=${TYPE:-test}
 working_dir=/home/domhnall/Repos/fairseq

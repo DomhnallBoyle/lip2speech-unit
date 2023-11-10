@@ -1,3 +1,4 @@
+#!/bin/bash
 root=$1
 type=${TYPE:-test}
 detect_landmark=${DETECT_LANDMARK:-0}

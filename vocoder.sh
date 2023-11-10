@@ -1,3 +1,4 @@
+#!/bin/bash
 vocoder_path=$1
 output_path=$2
 working_dir=/home/domhnall/Repos/lip2speech-unit/multi_input_vocoder

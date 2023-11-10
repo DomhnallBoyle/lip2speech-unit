@@ -12,7 +12,7 @@ import config
 sys.path.extend([str(config.REPOS_PATH), str(config.SV2S_PATH)])
 from sv2s.asr import WhisperASR
 from sv2s.denoise import denoise_audio
-from sv2s.detector import filter_landmarks, get_face_landmarks
+from sv2s.detector import filter_landmarks, get_face_landmarks, init_facial_detectors
 from sv2s.utils import convert_fps, convert_video_codecs, crop_video, get_fps, get_sample_rate, get_speaker_embedding, \
     get_video_duration, get_viseme_distance, get_words_to_visemes_d, load_groundtruth_data, overlay_audio, split_list
 
