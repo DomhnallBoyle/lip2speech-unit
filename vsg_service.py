@@ -16,8 +16,7 @@ import config
 from email_client import send_email
 from helpers import WhisperASR, crop_video, extract_audio, get_video_duration, merge_videos
 
-MAX_VIDEO_DURATION = config.MAX_GPU_DURATION if config.USING_GPU else config.MAX_VIDEO_DURATION
-MAX_VIDEO_DURATION -= 0.5  # bit of leeway for decoder success
+MAX_VIDEO_DURATION = config.MAX_VIDEO_DURATION - 0.5  # bit of leeway for decoder success
 MIN_VIDEO_DURATION = 1
 SLEEP_TIME = 10
 

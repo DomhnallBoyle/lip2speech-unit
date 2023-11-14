@@ -37,14 +37,19 @@ from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codec
         is_valid_file, overlay_audio, preprocess_audio as post_process_audio, resize_video, save_video
 
 # TODO: 
-# resize video anyway regardless of using GPU or not - might help speed up detector/predictor?
 # record in db the vsg service usages
 # think about how stats will work, where will videos be saved etc
+# need faster detector/predictor or ways to speed this up
+    # use fast detector + ibug detector as backup for frames it couldn't get initially
+    # can't use facenet-pytorch because it only returns 5 landmark points
+    # need to wrap dlib with Dockerfile - use liopa/dlib
+# ffmpeg-normalise seems to work with audio < 3 seconds now - speed up rnnoise
+# use ibug face detectors/predictors for VSG service, dlib for SRAVI (speed reasons)?
+# add UIDs to logs, :.2f in logs for time taken
+# add wrapper function for timing things
+# time detection through function call vs. redis queue
 
-MAX_VIDEO_DURATION = config.MAX_GPU_DURATION if config.USING_GPU else config.MAX_VIDEO_DURATION
-
-device = torch.device('cuda:0' if config.USING_GPU else 'cpu')
-asr = WhisperASR(model='base.en', device=device)
+asr = WhisperASR(model='base.en', device='cpu')
 
 sem = threading.Semaphore()
 stream_sem = threading.Semaphore()
@@ -57,7 +62,6 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logging.info(f'Using: {device}')
 
 speaker_embedding_lookup = {}
 video_frames = []
@@ -81,9 +85,9 @@ def dequeue_landmarks(redis_cache, max_frames_lambda):
         frame_index, frame_landmarks = pickle.loads(item)
 
         frame_indexes.append(frame_index)
-        video_landmarks['bbox'].extend(frame_landmarks['bbox'])
-        video_landmarks['landmarks'].extend(frame_landmarks['landmarks'])
-        video_landmarks['landmarks_scores'].extend(frame_landmarks['landmarks_scores'])
+        video_landmarks['bbox'].append(frame_landmarks['bbox'])
+        video_landmarks['landmarks'].append(frame_landmarks['landmarks'])
+        video_landmarks['landmarks_scores'].append(frame_landmarks['landmarks_scores'])
 
         i += 1
 
@@ -165,7 +169,7 @@ def create_app(args=None, args_path=None):
             logging.warning('Speaker embedding server is down...')
     
     # get synthesiser checkpoints
-    response = execute_request('GET CHECKPOINTS', requests.get, 'http://127.0.0.1:5004/checkpoints')
+    response = execute_request('GET CHECKPOINTS', requests.get, f'http://127.0.0.1:{config.DECODER_PORT}/checkpoints')
     if response.status_code != HTTPStatus.OK:
         logging.warning('Synthesiser is down...')
         checkpoint_ids = ['base']
@@ -211,7 +215,7 @@ def create_app(args=None, args_path=None):
             d.mkdir(parents=True)
 
         # optional model checkpoint id
-        response = execute_request('LOAD CHECKPOINT', requests.post, 'http://127.0.0.1:5004/load_checkpoint', json={'checkpoint_id': checkpoint_id})
+        response = execute_request('LOAD CHECKPOINT', requests.post, f'http://127.0.0.1:{config.DECODER_PORT}/load_checkpoint', json={'checkpoint_id': checkpoint_id})
         if response.status_code != HTTPStatus.NO_CONTENT:
             return {'message': 'Failed to load checkpoint'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
@@ -221,16 +225,21 @@ def create_app(args=None, args_path=None):
                 return {'message': f'Uploaded {stream} file is not valid'}, HTTPStatus.BAD_REQUEST
 
         # convert size if applicable to prevent GPU memory overload
-        if config.USING_GPU:
-            width, height = get_video_size(video_path=video_upload_path)
-            video_dims = get_updated_dims(width=width, height=height)
-            if video_dims != (width, height):
-                logging.info(f'Resizing video with (w, h) from ({width}, {height}) to {video_dims}')
-                resize_video(video_upload_path, *video_dims)
+        width, height = get_video_size(video_path=video_upload_path)
+        video_dims = get_updated_dims(width=width, height=height)
+        if video_dims != (width, height):
+            logging.info(f'Resizing video with (w, h) from ({width}, {height}) to {video_dims}')
+            start_time = time.time()
+            resize_video(video_upload_path, *video_dims)
+            time_taken = round(time.time() - start_time, 2)
+            logging.info(f'Resize video took {time_taken} secs')
 
         # convert fps if applicable
         if get_fps(video_path=video_upload_path) != config.FPS:
+            start_time = time.time()
             convert_fps(input_video_path=video_upload_path, fps=config.FPS, output_video_path=video_raw_path)
+            time_taken = round(time.time() - start_time, 2)
+            logging.info(f'Convert FPS took {time_taken} secs')
         else:
             shutil.copyfile(video_upload_path, video_raw_path)
 
@@ -238,8 +247,8 @@ def create_app(args=None, args_path=None):
         video_duration = num_video_frames / config.FPS
 
         # check video duration
-        if video_duration > MAX_VIDEO_DURATION:
-            return {'message': f'Video too long, must be <= {MAX_VIDEO_DURATION} seconds'}, HTTPStatus.BAD_REQUEST
+        if video_duration > config.MAX_VIDEO_DURATION:
+            return {'message': f'Video too long, must be <= {config.MAX_VIDEO_DURATION} seconds'}, HTTPStatus.BAD_REQUEST
 
         # get speaker embedding
         logging.info(f'Getting speaker embedding from "{audio_file.filename}"')
@@ -304,7 +313,7 @@ def create_app(args=None, args_path=None):
         np.save(config.MEL_SPEC_DIRECTORY.joinpath(f'{uid}.npy'), mel)
 
         # extract mouth frames
-        response = execute_request('MOUTH FRAMES', requests.post, 'http://127.0.0.1:5003/extract_mouth_frames', json={'root': str(config.WORKING_DIRECTORY)})
+        response = execute_request('MOUTH FRAMES', requests.post, f'http://127.0.0.1:{config.ALIGN_MOUTH_PORT}/extract_mouth_frames', json={'root': str(config.WORKING_DIRECTORY)})
         if response.status_code != HTTPStatus.NO_CONTENT:
             return {'message': 'Failed to extract mouth frames'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
@@ -318,7 +327,8 @@ def create_app(args=None, args_path=None):
             f.write(f'{" ".join(speech_units)}\n')
 
         # run synthesis
-        response = execute_request('SYNTHESIS', requests.post, 'http://127.0.0.1:5004/synthesise')
+        decoder_port = config.DECODER_CPU_PORT if video_duration > config.MAX_GPU_DURATION else config.DECODER_PORT
+        response = execute_request(f'SYNTHESIS WITH PORT {decoder_port}', requests.post, f'http://127.0.0.1:{decoder_port}/synthesise')
         if response.status_code != HTTPStatus.NO_CONTENT:
             return {'message': 'Failed to run synthesiser'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
@@ -326,7 +336,7 @@ def create_app(args=None, args_path=None):
         setup_vocoder_inference(SimpleNamespace(**{'type': config.TYPE, 'dataset_directory': config.WORKING_DIRECTORY, 'synthesis_directory': config.SYNTHESIS_DIRECTORY}))
 
         # run vocoder
-        response = execute_request('VOCODER', requests.post, 'http://127.0.0.1:5005/vocoder')
+        response = execute_request('VOCODER', requests.post, f'http://127.0.0.1:{config.VOCODER_PORT}/vocoder')
         if response.status_code != HTTPStatus.NO_CONTENT:
             return {'message': 'Failed to run vocoder'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
@@ -396,16 +406,15 @@ def create_app(args=None, args_path=None):
         global video_frames, frame_dims
 
         frame = bytes_to_frame(encoded_frame)
+        height, width = frame.shape[:2]
+        
+        if not frame_dims:
+            frame_dims = get_updated_dims(width=width, height=height)
+            logging.info(f'Retrieved updated dims (w, h): before ({width}, {height}), after {frame_dims}')
 
-        if config.USING_GPU:
-            height, width = frame.shape[:2]
-            
-            if not frame_dims:
-                frame_dims = get_updated_dims(width=width, height=height)
-                logging.info(f'Retrieved updated dims (w, h): before ({width}, {height}), after {frame_dims}')
-
-            if frame_dims != (width, height):
-                frame = cv2.resize(frame, frame_dims)  # (width, height)
+        if frame_dims != (width, height):
+            logging.info(f'Resizing frame with (w, h) from ({width}, {height}) to {frame_dims}')
+            frame = cv2.resize(frame, frame_dims)  # (width, height)
 
         queue_frame(redis_cache=cache, frame_index=frame_index, frame=frame)
         video_frames.append(frame)

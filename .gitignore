@@ -13,3 +13,4 @@ fairseq
 *.dat
 *.npy
 *.db
+*.env

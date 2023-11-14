@@ -1,0 +1,55 @@
+ARG DLIB_BASE_IMAGE
+
+FROM ${DLIB_BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y
+RUN apt-get install -y \
+    pkg-config \
+    ffmpeg \
+    libavformat-dev \
+    libavcodec-dev \
+    libswscale-dev \
+    wget \
+    git
+
+# install cmake 3.8.0
+WORKDIR /tmp
+RUN wget https://cmake.org/files/v3.8/cmake-3.8.0.tar.gz
+RUN tar -xvf cmake-3.8.0.tar.gz
+RUN cd cmake-3.8.0 && ./bootstrap && make -j4 && make install
+RUN cmake --version
+
+# install python3.8
+WORKDIR /tmp
+RUN apt-get install -y \
+    build-essential \
+    zlib1g-dev \
+    libncurses5-dev \
+    libgdbm-dev \
+    libnss3-dev \
+    libssl-dev \
+    libreadline-dev \
+    libffi-dev \
+    libsqlite3-dev \
+    libbz2-dev
+RUN wget https://www.python.org/ftp/python/3.8.0/Python-3.8.0.tgz
+RUN tar -xvf Python-3.8.0.tgz
+RUN cd Python-3.8.0 && ./configure --enable-optimizations && make -j4 && make altinstall
+
+# install dlib python API
+WORKDIR /tmp
+RUN wget https://github.com/davisking/dlib/archive/refs/tags/v19.17.tar.gz
+RUN tar -xvf v19.17.tar.gz
+RUN cd dlib-19.17 && python3.8 setup.py install
+
+WORKDIR /src
+
+RUN python3.8 -m pip install --upgrade pip
+RUN python3.8 -m pip install -v \
+    opencv-python==4.8.1.78 \
+    numpy==1.19.5 \
+    redis==4.3.6
+
+CMD python3.8 face_landmarks_server.py server

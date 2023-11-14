@@ -86,6 +86,7 @@ def _get_speaker_embedding(audio_path):
 
 
 def get_updated_dims(width, height):
+    # return min dims of input width/height or config width/height depending on orientation
     is_landscape = width > height
     max_width, max_height = (config.DIM_1, config.DIM_2) if is_landscape else (config.DIM_2, config.DIM_1)
 

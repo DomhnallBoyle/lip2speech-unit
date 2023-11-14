@@ -23,9 +23,7 @@ MEL_FMIN = 0.0
 MEL_FMAX = 8000.0
 AUDIO_FRAME_RATE = 50
 DIM_1, DIM_2 = 640, 480
-MAX_GPU_DURATION = int(os.environ.get('MAX_GPU_DURATION', 6))
 MAX_VIDEO_DURATION = 24
-USING_GPU = torch.cuda.is_available()
 
 # synthesis setup
 DB_PATH = Path('server.db')
@@ -53,6 +51,12 @@ SV2S_PATH = REPOS_PATH.joinpath('sv2s')
 RNNOISE_PATH = REPOS_PATH.joinpath('rnnoise/examples/rnnoise_demo')
 for p in [FAIRSEQ_PATH, SV2S_PATH, RNNOISE_PATH]:
     assert p.exists(), f'{p} does not exist'
+MAX_GPU_DURATION = int(os.environ.get('MAX_GPU_DURATION', 6))  # for the decoder
+USING_GPU = torch.cuda.is_available()
+ALIGN_MOUTH_PORT = 5003
+DECODER_PORT = 5004
+VOCODER_PORT = 5005
+DECODER_CPU_PORT = 5006
 
 # email
 EMAIL_HOST = os.environ.get('EMAIL_HOST', 'send.one.com')
