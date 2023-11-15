@@ -21,5 +21,5 @@ override:
   noise_prob: 0.0
   noise_snr: 0
   modalities: ['video']
-  # data: "/mnt/storage/lip2speech-unit/datasets/sravi_darryl_keywords/label"
-  # label_dir: "/mnt/storage/lip2speech-unit/datasets/sravi_darryl_keywords/label"
+  # data: ""
+  # label_dir: ""

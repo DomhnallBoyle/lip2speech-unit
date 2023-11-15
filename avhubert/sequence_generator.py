@@ -38,6 +38,7 @@ class SequenceGenerator(nn.Module):
         symbols_to_strip_from_output=None,
         lm_model=None,
         lm_weight=1.0,
+        **kwargs
     ):
         """Generates translations of a given source sentence.
 
@@ -115,6 +116,8 @@ class SequenceGenerator(nn.Module):
         self.lm_weight = lm_weight
         if self.lm_model is not None:
             self.lm_model.eval()
+
+        self.kwargs = kwargs
 
     def cuda(self):
         self.model.cuda()

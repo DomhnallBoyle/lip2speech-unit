@@ -39,6 +39,7 @@ class LabelEncoderUnit(LabelEncoder):
 class Lip2SpeechConfig(AVHubertPretrainingConfig):
     time_mask: bool = field(default=False)
     random_erase: bool = field(default=False)
+    fp16: bool = field(default=False)
 
 @register_task("lip2speech", dataclass=Lip2SpeechConfig)
 class Lip2SpeechTask(AVHubertPretrainingTask):
@@ -99,4 +100,7 @@ class Lip2SpeechTask(AVHubertPretrainingTask):
         if seq_gen_cls is None:
             from .sequence_generator import MultiTargetSequenceGenerator
             seq_gen_cls = MultiTargetSequenceGenerator
-        return super().build_generator(models, args, seq_gen_cls=seq_gen_cls, extra_gen_cls_kwargs=None, prefix_allowed_tokens_fn=None)
+
+        extra_gen_cls_kwargs['fp16'] = self.cfg.fp16
+
+        return super().build_generator(models, args, seq_gen_cls=seq_gen_cls, extra_gen_cls_kwargs=extra_gen_cls_kwargs, prefix_allowed_tokens_fn=None)

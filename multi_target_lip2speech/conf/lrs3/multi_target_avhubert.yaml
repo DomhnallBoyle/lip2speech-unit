@@ -42,6 +42,7 @@ task:
   random_crop: false
   time_mask: true
   random_erase: true
+  fp16: ???
 
 dataset:
   num_workers: 3
@@ -97,6 +98,7 @@ hydra:
           - run
           - task.data
           - task.label_dir
+          - task.fp16
           - model.w2v_path
           - dataset.train_subset
           - dataset.valid_subset

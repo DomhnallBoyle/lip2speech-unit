@@ -12,18 +12,19 @@ REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1')
 REDIS_PORT = 6379
 REDIS_FRAME_QUEUE = 'vsg_frame_queue'
 REDIS_LANDMARK_QUEUE = 'vsg_landmark_queue'
-REDIS_WAIT_TIME = 0.01
+REDIS_WAIT_TIME = 0.001
+
+TEST_VIDEO_PATH = 'datasets/example.mp4'
 
 frontal_detector = dlib.get_frontal_face_detector()  # HOG
 cnn_detector = dlib.cnn_face_detection_model_v1('avhubert/preparation/mmod_human_face_detector.dat')  # MMOD
 predictor = dlib.shape_predictor('avhubert/preparation/shape_predictor_68_face_landmarks.dat')
 get_detections = None
 
-# TODO: 
-# fallback to ibug detector if missing detections?
-# will HOG be faster than MMOD on production server? Should use MMOD as backup if so
-# 1) HOG + ibug fallback?
-# 2) HOG + MMOD fallback?
+# TODO:
+# server should take video path from queue instead of frames
+# the point of using frames was for streaming them
+# stream portions of video instead?
 
 
 def get_detections_frontal(frame):
@@ -52,11 +53,28 @@ def get_face_landmarks(frame):
     return rects, all_coords
 
 
+def get_video_frames(video_path):
+    video_capture = cv2.VideoCapture(video_path)
+
+    while True:
+        success, frame = video_capture.read()
+        if not success:
+            break
+
+        yield frame
+
+    video_capture.release()
+
+
 def server(args):
     global get_detections
     get_detections = get_detections_cnn
 
     cache = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+
+    # do video run through
+    for frame in get_video_frames(video_path=TEST_VIDEO_PATH):
+        get_face_landmarks(frame=frame)
 
     while True: 
         item = cache.lpop(REDIS_FRAME_QUEUE)
@@ -83,17 +101,7 @@ def server(args):
 def profile(args):
     assert os.path.exists(args.video_path)
 
-    def get_video_frames(video_path):
-        video_capture = cv2.VideoCapture(video_path)
-
-        while True:
-            success, frame = video_capture.read()
-            if not success:
-                break
-
-            yield frame
-
-        video_capture.release()
+    cache = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
 
     frames = list(get_video_frames(video_path=args.video_path))
 
@@ -101,6 +109,7 @@ def profile(args):
         global get_detections
         get_detections = _get_detections
 
+        # profile function call
         times = []
         for _ in range(args.num_repeats):
             start_time = time.time()
@@ -112,7 +121,29 @@ def profile(args):
                     num_fails += 1
 
             times.append(time.time() - start_time)
-        print(f'{name}, avg. time: {np.mean(times):.2f}, fail rate: {num_fails / len(frames):.2f}')
+
+        print(f'{name} - function call, num frames: {len(frames)}, avg. time: {np.mean(times):.2f}, fail rate: {num_fails / len(frames):.2f}')
+
+        # profile redis call
+        times = []
+        for _ in range(args.num_repeats):
+            start_time = time.time()
+
+            for frame_index, frame in enumerate(frames):
+                item = (frame_index, frame)
+                cache.rpush(REDIS_FRAME_QUEUE, pickle.dumps(item))
+            
+            i, max_frames = 0, frame_index + 1
+            while i < max_frames:
+                item = cache.lpop(REDIS_LANDMARK_QUEUE)
+                if not item:
+                    continue
+                _, _ = pickle.loads(item)
+                i += 1  # keep popping off the list when landmarks become available
+
+            times.append(time.time() - start_time)
+
+        print(f'{name} - redis queue, num frames: {len(frames)}, avg. time: {np.mean(times):.2f}')
 
     _profile('DLIB frontal detector', get_detections_frontal)
     _profile('DLIB MMOD CNN detector', get_detections_cnn)

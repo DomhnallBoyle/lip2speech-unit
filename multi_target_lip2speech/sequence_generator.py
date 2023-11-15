@@ -15,6 +15,10 @@ import numpy as np
 
 from avhubert.sequence_generator import SequenceGenerator
 class MultiTargetSequenceGenerator(SequenceGenerator):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
     def _generate(
         self,
         sample: Dict[str, Dict[str, Tensor]],
@@ -94,6 +98,11 @@ class MultiTargetSequenceGenerator(SequenceGenerator):
                     if sample['target'][i][trg_i] == self.eos:
                         sample['target'][i][trg_i] = sample['target'][i][trg_i-1]
         ###
+
+        if self.kwargs['fp16']:
+            net_input['source']['video'] = net_input['source']['video'].half()
+            net_input['padding_mask'] = net_input['padding_mask'].half()
+            net_input['spk_emb'] = net_input['spk_emb'].half()
 
         # compute the encoder output for each beam
         encoder_outs = self.model.forward_encoder(net_input)

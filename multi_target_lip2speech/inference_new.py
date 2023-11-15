@@ -75,6 +75,7 @@ class InferConfig(FairseqDataclass):
         },
     )
     port: int = field(default=5004)
+    fp16: bool = field(default=False)
 
 
 def main(cfg: DictConfig):
@@ -141,6 +142,7 @@ def setup_config_and_task(cfg):
         task.cfg.data = cfg.override.data
     if cfg.override.label_dir is not None:
         task.cfg.label_dir = cfg.override.label_dir
+    task.cfg.fp16 = cfg.fp16
 
     cfg.dataset.batch_size = 1
 

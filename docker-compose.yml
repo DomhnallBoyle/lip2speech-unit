@@ -3,16 +3,27 @@ services:
     #     build:
     #         context: .
     #         dockerfile: Dockerfile.vsg
+    #         args:
+    #             VSG_BASE_IMAGE: ${VSG_BASE_IMAGE:-pytorch/pytorch:1.0-cuda10.0-cudnn7-devel}
     #     image: liopa/vsg
     #     container_name: vsg
     #     environment:
-    #         REDIS_HOST: ${REDIS_HOST}
-    #         EMAIL_USERNAME: ${EMAIL_USERNAME}
-    #         EMAIL_PASSWORD: ${EMAIL_PASSWORD}
+    #         REDIS_HOST: ${REDIS_HOST:-vsg-redis}
+    #         EMAIL_USERNAME: ${EMAIL_USERNAME:-dev}
+    #         EMAIL_PASSWORD: ${EMAIL_PASSWORD:-123}
     #     ports:
     #         - 5002:5002
+    #     volumes:
+    #         - ./:/src
     #     networks:
     #         - vsg-network
+    #     deploy:
+    #         resources:
+    #             reservations:
+    #                 devices:
+    #                     - driver: nvidia
+    #                       count: 1
+    #                       capabilities: [gpu]
 
     vsg-dlib:
         build: 
@@ -20,6 +31,7 @@ services:
             dockerfile: Dockerfile.dlib
             args:
                 DLIB_BASE_IMAGE: ${DLIB_BASE_IMAGE:-pytorch/pytorch:1.0-cuda10.0-cudnn7-devel}
+                DLIB_VERSION: ${DLIB_VERSION:-19.17}
         image: liopa/vsg-dlib
         environment:
             REDIS_HOST: ${REDIS_HOST:-vsg-redis}

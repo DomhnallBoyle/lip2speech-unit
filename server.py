@@ -34,20 +34,16 @@ from email_client import send_email
 from db import DB
 from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codecs, filter_landmarks, \
     get_fps, get_num_video_frames, _get_speaker_embedding, get_updated_dims, get_video_frames, get_video_size, \
-        is_valid_file, overlay_audio, preprocess_audio as post_process_audio, resize_video, save_video
+        is_valid_file, overlay_audio, preprocess_audio as post_process_audio, resize_video, save_video, time_wrapper
 
 # TODO: 
 # record in db the vsg service usages
 # think about how stats will work, where will videos be saved etc
-# need faster detector/predictor or ways to speed this up
-    # use fast detector + ibug detector as backup for frames it couldn't get initially
-    # can't use facenet-pytorch because it only returns 5 landmark points
-    # need to wrap dlib with Dockerfile - use liopa/dlib
 # ffmpeg-normalise seems to work with audio < 3 seconds now - speed up rnnoise
+    # requires ffmpeg v6 - dockerise this
 # use ibug face detectors/predictors for VSG service, dlib for SRAVI (speed reasons)?
-# add UIDs to logs, :.2f in logs for time taken
-# add wrapper function for timing things
 # time detection through function call vs. redis queue
+# containerise vsg
 
 asr = WhisperASR(model='base.en', device='cpu')
 
@@ -99,7 +95,7 @@ def dequeue_landmarks(redis_cache, max_frames_lambda):
     num_frames = len(video_landmarks['landmarks'])
     assert num_frames == max_frames_lambda(), f'{num_frames} landmarks != {max_frames_lambda()} frames'
 
-    return filter_landmarks(video_landmarks), sorted_indexes
+    return filter_landmarks(video_landmarks), sorted_indexes, video_landmarks['bbox']
 
 
 def get_landmarks(redis_cache, video_path):
@@ -116,15 +112,12 @@ def get_landmarks(redis_cache, video_path):
 
 
 def execute_request(name, r, *args, **kwargs):
-    start_time = time.time()
     try:
-        response = r(*args, **kwargs)
+        response, time_taken = time_wrapper(r, *args, **kwargs)
+        logging.info(f'Request [{name}] took {time_taken} secs')
     except Exception as e:
         logging.error(f'Request failed: {e}')
         response = Response(status=HTTPStatus.INTERNAL_SERVER_ERROR)
-    time_taken = round(time.time() - start_time, 2)
-
-    logging.info(f'Request [{name}] took {time_taken} secs')
     
     return response
 
@@ -140,9 +133,8 @@ def setup(args, args_path):
     args.audio_paths = [p for p in args.audio_paths if p]
     assert len(args.audio_paths) > 0, f'Audio paths required'
     assert len(args.audio_paths) == len(set(args.audio_paths)), f'Non-unique audio paths'
-    assert 'web_client_run_asr' in args.__dict__
-    assert 'web_client_streaming' in args.__dict__
-    assert 'prod' in args.__dict__
+    for k in ['web_client_run_asr', 'web_client_streaming', 'prod', 'debug']:
+        assert k in args.__dict__
 
     # setup static and server directories
     for d in [config.INPUTS_PATH, config.STATIC_PATH]:
@@ -199,6 +191,8 @@ def create_app(args=None, args_path=None):
         # acquire lock
         sem.acquire()
 
+        logging.info(f'Synthesising UID {uid}...')
+
         video_upload_path = str(config.INPUTS_PATH.joinpath(f'{uid}.mp4'))
         audio_upload_path = str(config.INPUTS_PATH.joinpath(f'{uid}.wav'))
         video_raw_path = str(config.VIDEO_RAW_DIRECTORY.joinpath(f'{uid}.mp4'))
@@ -225,20 +219,17 @@ def create_app(args=None, args_path=None):
                 return {'message': f'Uploaded {stream} file is not valid'}, HTTPStatus.BAD_REQUEST
 
         # convert size if applicable to prevent GPU memory overload
+        fps = get_fps(video_path=video_upload_path)
         width, height = get_video_size(video_path=video_upload_path)
         video_dims = get_updated_dims(width=width, height=height)
         if video_dims != (width, height):
             logging.info(f'Resizing video with (w, h) from ({width}, {height}) to {video_dims}')
-            start_time = time.time()
-            resize_video(video_upload_path, *video_dims)
-            time_taken = round(time.time() - start_time, 2)
+            _, time_taken = time_wrapper(resize_video, video_upload_path, *video_dims)
             logging.info(f'Resize video took {time_taken} secs')
 
         # convert fps if applicable
-        if get_fps(video_path=video_upload_path) != config.FPS:
-            start_time = time.time()
-            convert_fps(input_video_path=video_upload_path, fps=config.FPS, output_video_path=video_raw_path)
-            time_taken = round(time.time() - start_time, 2)
+        if fps != config.FPS:
+            _, time_taken = time_wrapper(convert_fps, input_video_path=video_upload_path, fps=config.FPS, output_video_path=video_raw_path)
             logging.info(f'Convert FPS took {time_taken} secs')
         else:
             shutil.copyfile(video_upload_path, video_raw_path)
@@ -256,9 +247,7 @@ def create_app(args=None, args_path=None):
         if speaker_embedding is None:
             logging.info('Preloaded embedding doesn\'t exist, retrieving new embedding...')
             try:
-                start_time = time.time()
-                speaker_embedding = _get_speaker_embedding(audio_path=audio_upload_path)
-                time_taken = round(time.time() - start_time, 2)
+                speaker_embedding, time_taken = time_wrapper(_get_speaker_embedding, audio_path=audio_upload_path)
                 logging.info(f'Extracting speaker embedding took {time_taken} secs')
             except requests.exceptions.ConnectionError:
                 return {'message': 'Speaker embedding server not available'}, HTTPStatus.INTERNAL_SERVER_ERROR
@@ -270,10 +259,9 @@ def create_app(args=None, args_path=None):
 
         # get face landmarks
         # NOTE: if multiple people in the frame, POI is decided by maximum bb in the frame
-        start_time = time.time()
-        face_landmarks = face_landmarks if face_landmarks is not None else get_landmarks(redis_cache=cache, video_path=video_raw_path)
-        time_taken = round(time.time() - start_time, 2)
-        logging.info(f'Extracting face landmarks took {time_taken} secs')
+        if face_landmarks is None:
+            face_landmarks, time_taken = time_wrapper(get_landmarks, redis_cache=cache, video_path=video_raw_path)
+            logging.info(f'Extracting face landmarks took {time_taken} secs')
 
         # deal with frames where face/landmarks not detected
         try:
@@ -341,33 +329,31 @@ def create_app(args=None, args_path=None):
             return {'message': 'Failed to run vocoder'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         # post-processing audio - denoise and normalise
-        start_time = time.time()
-        post_process_audio(
+        _, time_taken = time_wrapper(post_process_audio,
             audio_path=pred_audio_path,
             output_path=str(config.POST_PROCESSED_AUDIO_PATH),
             sr=config.SAMPLING_RATE
         )
+        logging.info(f'Post-processing audio took {time_taken} secs')
         pred_audio_path = str(config.POST_PROCESSED_AUDIO_PATH)
 
         # overlay onto video
-        overlay_audio(video_raw_path, pred_audio_path, video_upload_path)
+        _, time_taken = time_wrapper(overlay_audio, video_raw_path, pred_audio_path, video_upload_path)
+        logging.info(f'Overlay audio took {time_taken} secs')
 
         # browser video playback compatibility, h264 is pretty universal
-        convert_video_codecs(
+        _, time_taken = time_wrapper(convert_video_codecs,
             input_video_path=video_upload_path,
             video_codec='libx264',
             audio_codec='aac',
             output_video_path=video_download_path
         )
-        time_taken = round(time.time() - start_time, 2)
-        logging.info(f'Post-processing took {time_taken} secs')
+        logging.info(f'Convert codecs took {time_taken} secs')
 
         # get asr results - on by default
         asr_preds = []
         if run_asr:
-            start_time = time.time()
-            asr_preds = asr.run(pred_audio_path)
-            time_taken = round(time.time() - start_time, 2)
+            asr_preds, time_taken = time_wrapper(asr.run, pred_audio_path)
             logging.info(f'Whisper ASR took {time_taken} secs')
 
         # log results in the db
@@ -446,7 +432,7 @@ def create_app(args=None, args_path=None):
                 audio_file.filename = audio_name
 
         # max frames keeps growing as lambda is executed constantly in loop
-        face_landmarks, sorted_indexes = dequeue_landmarks(redis_cache=cache, max_frames_lambda=lambda: len(video_frames))
+        face_landmarks, sorted_indexes, _ = dequeue_landmarks(redis_cache=cache, max_frames_lambda=lambda: len(video_frames))
 
         # TODO:
         #  fix error: server=127.0.0.1:5002//socket.io/ client=127.0.0.1:58606 socket shutdown error: [Errno 9] Bad file descriptor
@@ -521,10 +507,8 @@ def create_app(args=None, args_path=None):
         audio_upload_path = str(config.INPUTS_PATH.joinpath(f'{uid}.wav'))
 
         # required video file
-        start_time = time.time()
         video_file = request.files['video']
-        video_file.save(video_upload_path)
-        time_taken = round(time.time() - start_time, 2)
+        _, time_taken = time_wrapper(video_file.save, video_upload_path)
         logging.info(f'Video save took {time_taken} secs')
 
         # optional audio file for speaker embedding
@@ -640,8 +624,10 @@ if __name__ == '__main__':
     parser.add_argument('audio_paths', type=lambda s: s.split(','))
     parser.add_argument('--web_client_run_asr', action='store_true')
     parser.add_argument('--web_client_streaming', action='store_true')
-    parser.add_argument('--prod', action='store_true')
     parser.add_argument('--port', type=int, default=5002)
     parser.add_argument('--debug', action='store_true')
 
-    create_app(parser.parse_args())
+    args = parser.parse_args()
+    args.prod = False
+
+    create_app(args)

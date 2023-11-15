@@ -2,6 +2,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import cv2
 import ffmpeg
@@ -33,6 +34,14 @@ INVALID_VIDEO_FORMATS = ['image2', 'tty', 'ico', 'gif', 'pipe']
 
 def run_command(s):
     subprocess.run(s, shell=True)
+
+
+def time_wrapper(f, *args, **kwargs):
+    start_time = time.time()
+    f_out = f(*args, **kwargs)
+    time_taken = round(time.time() - start_time, 2)
+
+    return f_out, time_taken
 
 
 def frame_to_bytes(frame):
@@ -87,23 +96,64 @@ def _get_speaker_embedding(audio_path):
 
 def get_updated_dims(width, height):
     # return min dims of input width/height or config width/height depending on orientation
+    # ensure the same aspect ratio is kept
     is_landscape = width > height
     max_width, max_height = (config.DIM_1, config.DIM_2) if is_landscape else (config.DIM_2, config.DIM_1)
+    aspect_ratio = width / height
 
-    if width > max_width or height > max_height:
-        return max_width, max_height
+    if is_landscape:
+        # keep width fixed
+        if width > max_width:
+            width = max_width
+        
+        height = int(width / aspect_ratio)
+    else:
+        # keep height fixed
+        if height > max_height:
+            height = max_height
 
-    return width, height
+        width = int(height * aspect_ratio)
+
+    assert width <= max_width and height <= max_height, f'({width}, {max_width}) !<= ({height}, {max_height})'
+
+    return int(width), int(height)
 
 
-def show_frames(video_frames, face_landmarks):
-    for frame, landmarks in zip(video_frames, face_landmarks):
+def show_frames(video_frames, face_landmarks, bboxes=None, video_path=None):
+    if not bboxes:
+        bboxes = [[]] * len(video_frames)
+
+    if video_path:
+        video_frames = list(get_video_frames(video_path=video_path))
+
+    debug_frames = []
+    for frame, landmarks, bbox in zip(video_frames, face_landmarks, bboxes):
+        # draw landmarks
         for x, y in landmarks:
-            frame = cv2.circle(frame, (int(x), int(y)), radius=0, color=(0, 0, 255), thickness=3)
+            frame = cv2.circle(frame, (int(x), int(y)), radius=0, color=(0, 0, 255), thickness=2)
+
+        # draw bbox
+        for left, top, right, bottom in bbox:
+            left, top, right, bottom = int(left), int(top), int(right), int(bottom)
+            x, y = left, top
+            w = right - left
+            h = bottom - top
+            frame = cv2.rectangle(frame, (left, top), (x + w, y + h), (0, 255, 0), 2)
+
+        debug_frames.append(frame)
+
         cv2.imshow('Frame', frame)
         cv2.waitKey(25)
 
     cv2.destroyAllWindows()
+
+    save_video(debug_frames, '/tmp/landmarks_debug.mp4', fps=config.FPS, colour=True)
+
+
+def resize_video_opencv(video_path, width, height, fps):
+    new_frames = [cv2.resize(frame, (width, height)) for frame in get_video_frames(video_path=video_path)]
+
+    save_video(new_frames, video_path, fps=fps, colour=True)
 
 
 def resize_video(video_path, width, height, output_video_path='/tmp/video_resized.mp4'):
@@ -118,8 +168,8 @@ def resize_video(video_path, width, height, output_video_path='/tmp/video_resize
 
 def get_video_size(video_path):
     cap = cv2.VideoCapture(video_path)
-    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
 
     return width, height
@@ -208,7 +258,7 @@ def normalise_audio(audio_file, sr=16000):
     return normalised_audio_file
 
 
-def preprocess_audio(audio_path, output_path, delay=3, sr=16000):
+def preprocess_audio(audio_path, output_path, sr=16000):
     """
     It was found that denoising and then normalising the audio produced louder/more background noise
         - the denoising doesn't work as well on softer audio
@@ -217,27 +267,23 @@ def preprocess_audio(audio_path, output_path, delay=3, sr=16000):
     Normalising and then denoising the audio removed more noise but the sound was only slightly louder
         - normalising first makes the denoising process better
         - normalise again for good measure because the denoising process can make the speaking fainter
-
-    Normalising requires audios >= 3 seconds, pad all with silence and remove after
-    See: https://github.com/slhck/ffmpeg-normalize/issues/87
     """
     if not config.RNNOISE_PATH.exists():
         raise Exception(f'Failed to preprocess audio: {config.RNNOISE_PATH} does not exist...')
 
+    audio_file = tempfile.NamedTemporaryFile(suffix='.wav')
+    audio_file.name = audio_path
+
     denoised_audio_file = tempfile.NamedTemporaryFile(suffix='.wav')
 
-    # pad, normalise, denoise, normalise and strip
-    padded_audio_file = pad_audio(audio_path, delay=delay)
-    normalised_1_audio_file = normalise_audio(padded_audio_file, sr=sr)
+    normalised_1_audio_file = normalise_audio(audio_file, sr=sr)
     denoise_audio(str(config.RNNOISE_PATH), normalised_1_audio_file.name, denoised_audio_file.name)
     normalised_2_audio_file = normalise_audio(denoised_audio_file, sr=sr)
-    stripped_audio_file = remove_audio_pad(normalised_2_audio_file, delay=delay)
 
-    for f in [padded_audio_file, normalised_1_audio_file,
-              denoised_audio_file, normalised_2_audio_file]:
+    for f in [audio_file, normalised_1_audio_file, denoised_audio_file]:
         f.close()
+    
+    assert get_sample_rate(audio_path=normalised_2_audio_file.name) == sr
 
-    assert get_sample_rate(audio_path=stripped_audio_file.name) == sr
-
-    shutil.copyfile(stripped_audio_file.name, output_path)
-    stripped_audio_file.close()  
+    shutil.copyfile(normalised_2_audio_file.name, output_path)
+    normalised_2_audio_file.close()
