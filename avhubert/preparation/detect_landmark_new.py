@@ -101,21 +101,21 @@ def server(args):
                 pickle.dump(landmarks, f)
         """
 
-        align_mouth(SimpleNamespace(**{
-            'video_direc': input_directory,
-            'landmark_direc': output_directory,
-            'filename_path': manifest_path,
-            'save_direc': os.path.join(input_directory, 'video'),
-            'mean_face': '20words_mean_face.npy',
-            'crop_width': 96,
-            'crop_height': 96,
-            'start_idx': 48,
-            'stop_idx': 68,
-            'window_margin': 12,
-            'ffmpeg': '/usr/bin/ffmpeg',
-            'rank': 0,
-            'nshard': 1
-        }))
+        # align_mouth(SimpleNamespace(**{
+        #     'video_direc': input_directory,
+        #     'landmark_direc': output_directory,
+        #     'filename_path': manifest_path,
+        #     'save_direc': os.path.join(input_directory, 'video'),
+        #     'mean_face': '20words_mean_face.npy',
+        #     'crop_width': 96,
+        #     'crop_height': 96,
+        #     'start_idx': 48,
+        #     'stop_idx': 68,
+        #     'window_margin': 12,
+        #     'ffmpeg': '/usr/bin/ffmpeg',
+        #     'rank': 0,
+        #     'nshard': 1
+        # }))
 
         count_frames(SimpleNamespace(**{
             'root': input_directory,

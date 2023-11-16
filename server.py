@@ -33,8 +33,9 @@ from create_dataset import manifests as create_manifests, vocoder as setup_vocod
 from email_client import send_email
 from db import DB
 from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codecs, filter_landmarks, \
-    get_fps, get_num_video_frames, _get_speaker_embedding, get_updated_dims, get_video_frames, get_video_size, \
-        is_valid_file, overlay_audio, preprocess_audio as post_process_audio, resize_video, save_video, time_wrapper
+    get_fps, get_mouth_frames, get_num_video_frames, _get_speaker_embedding, get_updated_dims, get_video_frames, \
+        get_video_size, is_valid_file, overlay_audio, preprocess_audio as post_process_audio, resize_video, save_video, \
+            time_wrapper
 
 # TODO: 
 # record in db the vsg service usages
@@ -44,6 +45,7 @@ from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codec
 # use ibug face detectors/predictors for VSG service, dlib for SRAVI (speed reasons)?
 # time detection through function call vs. redis queue
 # containerise vsg
+# USE 1 VOCODER PROCESS in ps
 
 asr = WhisperASR(model='base.en', device='cpu')
 
@@ -134,7 +136,7 @@ def setup(args, args_path):
     assert len(args.audio_paths) > 0, f'Audio paths required'
     assert len(args.audio_paths) == len(set(args.audio_paths)), f'Non-unique audio paths'
     for k in ['web_client_run_asr', 'web_client_streaming', 'prod', 'debug']:
-        assert k in args.__dict__
+        assert k in args.__dict__, f'"{f}" not in args'
 
     # setup static and server directories
     for d in [config.INPUTS_PATH, config.STATIC_PATH]:
@@ -197,6 +199,7 @@ def create_app(args=None, args_path=None):
         audio_upload_path = str(config.INPUTS_PATH.joinpath(f'{uid}.wav'))
         video_raw_path = str(config.VIDEO_RAW_DIRECTORY.joinpath(f'{uid}.mp4'))
         video_landmarks_path = str(config.LANDMARKS_DIRECTORY.joinpath(f'{uid}.pkl'))
+        mouth_video_path = str(config.VIDEO_DIRECTORY.joinpath(f'{uid}.mp4'))
         audio_path = str(config.AUDIO_DIRECTORY.joinpath(f'{uid}.wav'))
         pred_audio_path = str(config.VOCODER_DIRECTORY.joinpath(f'pred_wav/{config.TYPE}/{uid}.wav'))
         video_download_path = str(config.STATIC_PATH.joinpath(f'{uid}.mp4'))
@@ -301,9 +304,15 @@ def create_app(args=None, args_path=None):
         np.save(config.MEL_SPEC_DIRECTORY.joinpath(f'{uid}.npy'), mel)
 
         # extract mouth frames
-        response = execute_request('MOUTH FRAMES', requests.post, f'http://127.0.0.1:{config.ALIGN_MOUTH_PORT}/extract_mouth_frames', json={'root': str(config.WORKING_DIRECTORY)})
-        if response.status_code != HTTPStatus.NO_CONTENT:
+        face_landmarks = [np.asarray(l) for l in face_landmarks]
+        mouth_frames, time_taken = time_wrapper(get_mouth_frames, video_path=video_raw_path, landmarks=face_landmarks, greyscale=False)
+        logging.info(f'Extracting mouth frames took {time_taken} secs')
+        if mouth_frames is None:
             return {'message': 'Failed to extract mouth frames'}, HTTPStatus.INTERNAL_SERVER_ERROR
+        save_video(mouth_frames, mouth_video_path, fps=config.FPS, colour=True)
+        response = execute_request('COUNT FRAMES', requests.post, f'http://127.0.0.1:{config.ALIGN_MOUTH_PORT}/extract_mouth_frames', json={'root': str(config.WORKING_DIRECTORY)})
+        if response.status_code != HTTPStatus.NO_CONTENT:
+            return {'message': 'Failed to count frames'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         # create manifests
         create_manifests(SimpleNamespace(**{'type': config.TYPE, 'dataset_directory': config.WORKING_DIRECTORY, 'dict_path': None}))

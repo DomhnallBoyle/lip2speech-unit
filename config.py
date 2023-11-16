@@ -51,7 +51,7 @@ SV2S_PATH = REPOS_PATH.joinpath('sv2s')
 RNNOISE_PATH = REPOS_PATH.joinpath('rnnoise/examples/rnnoise_demo')
 for p in [FAIRSEQ_PATH, SV2S_PATH, RNNOISE_PATH]:
     assert p.exists(), f'{p} does not exist'
-MAX_GPU_DURATION = int(os.environ.get('MAX_GPU_DURATION', 6))  # for the decoder
+MAX_GPU_DURATION = int(os.environ.get('MAX_GPU_DURATION', 10))  # for the decoder
 USING_GPU = torch.cuda.is_available()
 ALIGN_MOUTH_PORT = 5003
 DECODER_PORT = 5004
