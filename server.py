@@ -93,6 +93,7 @@ def dequeue_landmarks(redis_cache, max_frames_lambda):
     num_frames = len(video_landmarks['landmarks'])
     assert num_frames == max_frames_lambda(), f'{num_frames} landmarks != {max_frames_lambda()} frames'
 
+    # TODO: won't need to filter landmarks if using video because POI already found
     return filter_landmarks(video_landmarks), sorted_indexes, video_landmarks['bbox']
 
 
