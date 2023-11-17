@@ -40,12 +40,8 @@ from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codec
 # TODO: 
 # record in db the vsg service usages
 # think about how stats will work, where will videos be saved etc
-# ffmpeg-normalise seems to work with audio < 3 seconds now - speed up rnnoise
-    # requires ffmpeg v6 - dockerise this
-# use ibug face detectors/predictors for VSG service, dlib for SRAVI (speed reasons)?
-# time detection through function call vs. redis queue
 # containerise vsg
-# USE 1 VOCODER PROCESS in ps
+# 1 vocoder process
 
 asr = WhisperASR(model='base.en', device='cpu')
 
@@ -100,15 +96,13 @@ def dequeue_landmarks(redis_cache, max_frames_lambda):
     return filter_landmarks(video_landmarks), sorted_indexes, video_landmarks['bbox']
 
 
-def get_landmarks(redis_cache, video_path):
+def get_landmarks(redis_cache, video_path, max_frames):
     # reset queues
-    for q in [config.REDIS_FRAME_QUEUE, config.REDIS_LANDMARK_QUEUE]:
+    for q in [config.REDIS_VIDEO_QUEUE, config.REDIS_LANDMARK_QUEUE]:
         redis_cache.delete(q) 
 
-    for i, frame in enumerate(get_video_frames(video_path=video_path)):
-        queue_frame(redis_cache=redis_cache, frame_index=i, frame=frame)
-
-    max_frames = i + 1
+    # queue the video
+    redis_cache.rpush(config.REDIS_VIDEO_QUEUE, pickle.dumps(video_path))
 
     return dequeue_landmarks(redis_cache=redis_cache, max_frames_lambda=lambda: max_frames)[0]
 
@@ -263,7 +257,7 @@ def create_app(args=None, args_path=None):
         # get face landmarks
         # NOTE: if multiple people in the frame, POI is decided by maximum bb in the frame
         if face_landmarks is None:
-            face_landmarks, time_taken = time_wrapper(get_landmarks, redis_cache=cache, video_path=video_raw_path)
+            face_landmarks, time_taken = time_wrapper(get_landmarks, redis_cache=cache, video_path=video_raw_path, max_frames=num_video_frames)
             logging.info(f'Extracting face landmarks took {time_taken} secs')
 
         # deal with frames where face/landmarks not detected

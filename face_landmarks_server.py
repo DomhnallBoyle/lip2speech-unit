@@ -8,13 +8,7 @@ import dlib
 import numpy as np
 import redis
 
-REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1')
-REDIS_PORT = 6379
-REDIS_FRAME_QUEUE = 'vsg_frame_queue'
-REDIS_LANDMARK_QUEUE = 'vsg_landmark_queue'
-REDIS_WAIT_TIME = 0.001
-
-TEST_VIDEO_PATH = 'datasets/example.mp4'
+import config
 
 frontal_detector = dlib.get_frontal_face_detector()  # HOG
 cnn_detector = dlib.cnn_face_detection_model_v1('avhubert/preparation/mmod_human_face_detector.dat')  # MMOD
@@ -37,14 +31,17 @@ def get_detections_cnn(frame):
     return [d.rect for d in rects]
 
 
-def get_face_landmarks(frame):
+def get_face_landmarks(frame, rects=None):
     # convert to grayscale and detect multiple faces
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    rects = get_detections(frame=gray)
+
+    if rects is None:
+        rects = get_detections(frame=gray)
 
     all_coords = []
     for rect in rects:
         shape = predictor(gray, rect)
+
         coords = np.zeros((68, 2), dtype=np.int32)
         for i in range(0, 68):
             coords[i] = (shape.part(i).x, shape.part(i).y) 
@@ -66,42 +63,74 @@ def get_video_frames(video_path):
     video_capture.release()
 
 
-def server(args):
-    global get_detections
-    get_detections = get_detections_cnn
+def process_frame(frame_index, frame):
+    # run face and landmark detectors
+    rects, all_coords = get_face_landmarks(frame=frame)
 
-    cache = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+    # landmarks will be filtered by largest detected bbox later
+    frame_landmarks = {
+        'bbox': [[r.left(), r.top(), r.right(), r.bottom()] for r in rects],
+        'landmarks': all_coords,
+        'landmarks_scores': [[1.0] * 68 for _ in range(len(rects))]
+    }
 
-    # do video run through
-    for frame in get_video_frames(video_path=TEST_VIDEO_PATH):
-        get_face_landmarks(frame=frame)
+    return [frame_index], [frame_landmarks]
 
-    while True: 
-        item = cache.lpop(REDIS_FRAME_QUEUE)
-        if not item:
-            time.sleep(REDIS_WAIT_TIME)
-            continue
 
-        frame_index, frame = pickle.loads(item)
+def process_video(video_path):
+    frame_indices, video_landmarks = [], []
 
-        # run face and landmark detectors
-        rects, all_coords = get_face_landmarks(frame=frame)
+    for i, frame in enumerate(get_video_frames(video_path=video_path)):
+        # skip face detections every 2nd frame
+        if i % config.DETECTION_SKIP_NTH_FRAME == 0:
+            rects = None
+        rects, all_coords = get_face_landmarks(frame=frame, rects=rects)
         
-        # landmarks will be filtered by largest detected bbox later
         frame_landmarks = {
             'bbox': [[r.left(), r.top(), r.right(), r.bottom()] for r in rects],
             'landmarks': all_coords,
             'landmarks_scores': [[1.0] * 68 for _ in range(len(rects))]
         }
 
-        item = (frame_index, frame_landmarks)
-        cache.rpush(REDIS_LANDMARK_QUEUE, pickle.dumps(item))
+        frame_indices.append(i)
+        video_landmarks.append(frame_landmarks)
+
+    return frame_indices, video_landmarks
+
+
+def server(args):
+    global get_detections
+    get_detections = get_detections_cnn
+
+    cache = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT)
+
+    # do video run through to prepare GPU
+    for frame in get_video_frames(video_path=config.TEST_VIDEO_PATH):
+        get_face_landmarks(frame=frame)
+    
+    while True: 
+        item = cache.lpop(config.REDIS_VIDEO_QUEUE) or cache.lpop(config.REDIS_FRAME_QUEUE)
+        if not item:
+            time.sleep(config.REDIS_LANDMARK_WAIT_TIME)
+            continue
+
+        item = pickle.loads(item)
+
+        if type(item) is str:
+            frame_indices, video_landmarks = process_video(video_path=item)
+        else:
+            frame_indices, video_landmarks = process_frame(*item)
+
+        # queue landmarks
+        for frame_index, frame_landmarks in zip(frame_indices, video_landmarks):
+            item = (frame_index, frame_landmarks)
+            cache.rpush(config.REDIS_LANDMARK_QUEUE, pickle.dumps(item))
 
 
 def profile(args):
     assert os.path.exists(args.video_path)
 
-    cache = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+    cache = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT)
 
     frames = list(get_video_frames(video_path=args.video_path))
 
@@ -131,11 +160,11 @@ def profile(args):
 
             for frame_index, frame in enumerate(frames):
                 item = (frame_index, frame)
-                cache.rpush(REDIS_FRAME_QUEUE, pickle.dumps(item))
+                cache.rpush(config.REDIS_FRAME_QUEUE, pickle.dumps(item))
             
             i, max_frames = 0, frame_index + 1
             while i < max_frames:
-                item = cache.lpop(REDIS_LANDMARK_QUEUE)
+                item = cache.lpop(config.REDIS_LANDMARK_QUEUE)
                 if not item:
                     continue
                 _, _ = pickle.loads(item)

@@ -267,6 +267,8 @@ def preprocess_audio(audio_path, output_path, sr=16000):
     Normalising and then denoising the audio removed more noise but the sound was only slightly louder
         - normalising first makes the denoising process better
         - normalise again for good measure because the denoising process can make the speaking fainter
+
+    WARNING: Ensure ffmpeg and ffmpeg-normalize libraries are up-to-date 
     """
     if not config.RNNOISE_PATH.exists():
         raise Exception(f'Failed to preprocess audio: {config.RNNOISE_PATH} does not exist...')

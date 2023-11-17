@@ -2,15 +2,15 @@ import os
 from getpass import getpass
 from pathlib import Path
 
-import torch
-
 # redis
-REDIS_HOST = '127.0.0.1'
+REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1')
 REDIS_PORT = 6379
 REDIS_FRAME_QUEUE = 'vsg_frame_queue'
+REDIS_VIDEO_QUEUE = 'vsg_video_queue'
 REDIS_LANDMARK_QUEUE = 'vsg_landmark_queue'
 REDIS_SERVICE_QUEUE = 'vsg_service_queue'
-REDIS_WAIT_TIME = 0.01
+REDIS_VSG_SERVICE_WAIT_TIME = 0.01
+REDIS_LANDMARK_WAIT_TIME = 0.001
 
 # lip2speech params
 FPS = 25
@@ -52,11 +52,12 @@ RNNOISE_PATH = REPOS_PATH.joinpath('rnnoise/examples/rnnoise_demo')
 for p in [FAIRSEQ_PATH, SV2S_PATH, RNNOISE_PATH]:
     assert p.exists(), f'{p} does not exist'
 MAX_GPU_DURATION = int(os.environ.get('MAX_GPU_DURATION', 10))  # for the decoder
-USING_GPU = torch.cuda.is_available()
 ALIGN_MOUTH_PORT = 5003
 DECODER_PORT = 5004
 VOCODER_PORT = 5005
 DECODER_CPU_PORT = 5006
+TEST_VIDEO_PATH = 'datasets/example.mp4'
+DETECTION_SKIP_NTH_FRAME = 2
 
 # email
 EMAIL_HOST = os.environ.get('EMAIL_HOST', 'send.one.com')

@@ -143,7 +143,7 @@ def server(**kwargs):
     while True:
         service_request = cache.lpop(config.REDIS_SERVICE_QUEUE)
         if not service_request:
-            time.sleep(config.REDIS_WAIT_TIME)
+            time.sleep(config.REDIS_VSG_SERVICE_WAIT_TIME)
             continue
 
         try:

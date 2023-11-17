@@ -49,7 +49,7 @@ RUN wget https://github.com/davisking/dlib/archive/refs/tags/v${DLIB_VERSION}.ta
 RUN tar -xvf v${DLIB_VERSION}.tar.gz
 RUN cd dlib-${DLIB_VERSION} && python3.8 setup.py install
 
-WORKDIR /src
+WORKDIR /repos/lip2speech-unit
 
 RUN python3.8 -m pip install --upgrade pip
 RUN python3.8 -m pip install -v \
@@ -59,4 +59,4 @@ RUN python3.8 -m pip install -v \
 
 RUN python3.8 -c "import dlib; assert dlib.DLIB_USE_CUDA"
 
-CMD python3.8 face_landmarks_server.py server
+CMD python3.8 -u face_landmarks_server.py server

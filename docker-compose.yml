@@ -35,8 +35,11 @@ services:
         image: liopa/vsg-dlib
         environment:
             REDIS_HOST: ${REDIS_HOST:-vsg-redis}
+            EMAIL_USERNAME: dev
+            EMAIL_PASSWORD: 123
         volumes:
-            - ./:/src
+            - ${REPOS_PATH}:/repos
+            - /tmp:/tmp
         networks: 
             - vsg-network
         deploy:
