@@ -6,6 +6,7 @@ import sys
 import time
 import traceback
 import uuid
+from datetime import datetime
 from http import HTTPStatus
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import redis
 import requests
 
 import config
+from db import DB
 from email_client import send_email
 from helpers import WhisperASR, crop_video, extract_audio, get_video_duration, merge_videos
 
@@ -40,10 +42,11 @@ def synthesise(url, video_path, audio_path):
         with open(audio_path, 'rb') as f:
             files['audio'] = f.read()
 
-    return requests.post(f'{url}/synthesise?asr=0', files=files, verify=False)
+    # we want to upsample frames and skip ASR and creating a db record
+    return requests.post(f'{url}/synthesise?close_up=0&asr=0&log=0', files=files, verify=False)
 
 
-def service(url, uid, video_path, audio_path, notify=False, **kwargs):
+def service(url, uid, email, video_path, audio_path, notify=False, **kwargs):
     # setup
     output_directory = Path('/tmp/vsg')
     if output_directory.exists():
@@ -121,9 +124,18 @@ def service(url, uid, video_path, audio_path, notify=False, **kwargs):
         for t in asr_transcriptions:
             f.write(f'{t}\n')
 
+    # record in db
+    logging.info(f'{uid} - recording in db...')
+    with DB(config.DB_PATH) as cur:
+        usage_id = str(uuid.uuid4())
+        video_id = uid
+        model_id = cur.execute(f'SELECT id FROM model WHERE name=\'base\'').fetchone()[0]
+        cur.execute('INSERT INTO usage (id, model_id, video_id, audio_id, date) values (?, ?, ?, ?, ?)', (usage_id, model_id, video_id, None, datetime.now()))
+        cur.execute('INSERT INTO asr_transcription (id, usage_id, transcription) values (?, ?, ?)', (str(uuid.uuid4()), usage_id, asr_transcriptions[0]))
+        cur.execute('INSERT INTO vsg_service_usage (id, usage_id, email) values (?, ?, ?)', (str(uuid.uuid4()), usage_id, email)) 
+
     time_taken = time.time() - start_time
     time_taken = round(time_taken / 60, 2)
-
     logging.info(f'{uid} - done, took {time_taken} mins')
 
     # notify liopa personnel of completion

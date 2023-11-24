@@ -4,11 +4,11 @@ import multiprocessing
 import pickle
 import random
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
+import redis
 import soundfile as sf
 import torch
 from tqdm import tqdm
@@ -16,13 +16,16 @@ from tqdm import tqdm
 import config
 
 sys.path.append(str(config.FAIRSEQ_PATH))
-from helpers import convert_fps, crop_video, extract_audio, get_face_landmarks, get_fps, get_num_video_frames, get_video_duration, init_facial_detectors, preprocess_audio, split_list
 from examples.textless_nlp.gslm.unit2speech.tacotron2.layers import TacotronSTFT
+from helpers import convert_fps, crop_video, extract_audio, get_fps, get_ibug_landmarks, \
+    get_landmarks as get_dlib_landmarks, get_mouth_frames, get_num_video_frames, _get_speaker_embedding, \
+        get_updated_dims, get_video_duration, get_video_size, init_ibug_facial_detectors, preprocess_audio, resize_video, \
+            save_video, split_list
 
 stft = None
+cache = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT)
 
-# TODO: 
-#  fake audio, mel-spec and speech units for testing etc
+# TODO: fake audio, mel-spec and speech units for testing etc - only needs mouth frames and speaker embedding
 
 
 def trim_video_to_duration(video_path, cropped_video_path='/tmp/video_cropped.mp4'):
@@ -68,9 +71,17 @@ def extract_mel_spec(audio_path):
 def init_process(process_index, args, sample_paths, already_processed, to_process):
     cropped_video_path = f'/tmp/video_cropped_{process_index}.mp4'
     preprocessed_audio_path = f'/tmp/preprocessed_audio_{process_index}.wav'
+    resized_video_path = f'/tmp/video_resized_{process_index}.mp4'
 
-    if args.use_new_landmark_detector:
-        init_facial_detectors()
+    if args.use_ibug_for_landmarks:
+        init_ibug_facial_detectors()
+
+    # get speaker embedding if applicable
+    _speaker_embedding = None
+    if args.speaker_embedding_path:
+        _speaker_embedding = np.load(args.speaker_embedding_path)
+    elif args.speaker_embedding_audio_path:
+        _speaker_embedding = _get_speaker_embedding(audio_path=args.speaker_embedding_audio_path)
 
     for sample_path in tqdm(sample_paths):
         if str(sample_path) in already_processed:
@@ -86,6 +97,9 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
             for k, v in args.replace_paths.items():
                 video_path = str(video_path).replace(k, v)
 
+        if config.DEBUG:
+            print(f'Processing {video_path}...')
+
         video_path = Path(video_path)
         assert video_path.exists(), f'{video_path} does not exist'
 
@@ -95,9 +109,18 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
 
         video_path = str(video_path)
 
+        # resize if necessary
+        fps = get_fps(video_path=video_path)
+        if args.resize:
+            width, height = get_video_size(video_path=video_path)
+            video_dims = get_updated_dims(width=width, height=height)
+            if video_dims != (width, height):
+                resize_video(video_path, *video_dims, output_video_path=resized_video_path)
+                video_path = resized_video_path
+
         # copy raw video or convert fps if necessary
         raw_video_path = str(args.video_raw_directory.joinpath(f'{name}.mp4'))
-        if get_fps(video_path) != config.FPS:
+        if fps != config.FPS:
             convert_fps(video_path, config.FPS, raw_video_path)
         else:
             shutil.copyfile(video_path, raw_video_path)
@@ -131,16 +154,37 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
 
         # save speaker embedding
         speaker_embedding_path = args.spk_emb_directory.joinpath(f'{name}.npy')
-        if args.speaker_embedding_path:
-            speaker_embedding = np.load(args.speaker_embedding_path)
-        assert speaker_embedding.shape == (256,) and speaker_embedding.dtype == np.float32
-        np.save(speaker_embedding_path, speaker_embedding)
+        _speaker_embedding = _speaker_embedding if _speaker_embedding is not None else speaker_embedding
+        assert _speaker_embedding.shape == (256,) and _speaker_embedding.dtype == np.float32
+        np.save(speaker_embedding_path, _speaker_embedding)
 
         # use better detector if applicable
-        if args.use_new_landmark_detector:
-            face_landmarks = get_face_landmarks(video_path=video_path)[1]
+        face_landmarks = None
+        if args.use_ibug_for_landmarks:
+            face_landmarks = get_ibug_landmarks(video_path=video_path, skip_nth_frame=args.skip_nth_frame)[1]
+        elif args.use_dlib_for_landmarks:
+            # dlib docker image needs video copied to shared volume to access
+            new_video_path = f'/tmp/video_{process_index}.mp4'
+            shutil.copyfile(video_path, new_video_path)
+            face_landmarks = get_dlib_landmarks(redis_cache=cache, video_path=new_video_path, max_frames=num_video_frames)
+
+        if face_landmarks is not None:
+            # for testing purposes, just include test samples that have landmarks for every frame
+            # usually, iBUG detector/predictors are very good at extreme poses
+            num_invalid_frames = sum([l is None for l in face_landmarks])
+            if num_invalid_frames > 0:
+                if config.DEBUG:
+                    print(f'{num_invalid_frames}/{num_video_frames} invalid frames...')
+                continue
+
             with args.landmarks_directory.joinpath(f'{name}.pkl').open('wb') as f:
                 pickle.dump(face_landmarks, f)
+
+            if args.extract_mouth_frames:
+                mouth_video_path = str(args.video_directory.joinpath(f'{name}.mp4'))
+                face_landmarks = [np.asarray(l) for l in face_landmarks]
+                mouth_frames = get_mouth_frames(video_path=video_path, landmarks=face_landmarks, greyscale=False)
+                save_video(mouth_frames, mouth_video_path, fps=config.FPS, colour=True)
 
         with args.processed_path.open('a') as f:
             f.write(f'{sample_path}\n')
@@ -167,6 +211,7 @@ def init(args):
 
     args.video_raw_directory = video_raw_directory
     args.audio_directory = audio_directory
+    args.video_directory = video_directory
     args.mel_spec_directory = mel_spec_directory
     args.spk_emb_directory = spk_emb_directory
     args.landmarks_directory = landmarks_directory
@@ -197,7 +242,7 @@ def generate_file_list(args):
     dataset_directory = Path(args.dataset_directory)
 
     names = []
-    for video_path in dataset_directory.joinpath(args.type).glob('*.mp4'):
+    for video_path in dataset_directory.joinpath(f'video/{args.type}').glob('*.mp4'):
         names.append(video_path.stem)
 
     # create file list
@@ -299,12 +344,17 @@ if __name__ == '__main__':
 
     parser_1 = sub_parser.add_parser('init')
     parser_1.add_argument('output_directory')
+    parser_1.add_argument('--resize', action='store_true')
     parser_1.add_argument('--num_processes', type=int, default=1)
-    parser_1.add_argument('--use_new_landmark_detector', action='store_true')
+    parser_1.add_argument('--use_ibug_for_landmarks', action='store_true')
+    parser_1.add_argument('--skip_nth_frame', type=int, default=1)
+    parser_1.add_argument('--use_dlib_for_landmarks', action='store_true')
+    parser_1.add_argument('--extract_mouth_frames', action='store_true')
     parser_1.add_argument('--denoise_and_normalise', action='store_true')
     parser_1.add_argument('--replace_paths', type=lambda s: json.loads(s))
     parser_1.add_argument('--use_unique_parent_name', action='store_true')
     parser_1.add_argument('--speaker_embedding_path')
+    parser_1.add_argument('--speaker_embedding_audio_path')
     parser_1.add_argument('--num_samples', type=int)
     parser_1.add_argument('--samples_path')
     parser_1.add_argument('--max_duration', type=int)

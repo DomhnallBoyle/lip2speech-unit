@@ -1,5 +1,4 @@
 import os
-from getpass import getpass
 from pathlib import Path
 
 # redis
@@ -58,10 +57,12 @@ VOCODER_PORT = 5005
 DECODER_CPU_PORT = 5006
 TEST_VIDEO_PATH = 'datasets/example.mp4'
 FACE_DETECTION_ON_NTH_FRAME = 2
+FACE_DETECTION_PRE_CROP_FACE_SCALE_FACTOR = 1.3
+DEBUG = bool(int(os.environ.get('DEBUG', 0)))
 
 # email
 EMAIL_HOST = os.environ.get('EMAIL_HOST', 'send.one.com')
 EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
-EMAIL_USERNAME = os.environ.get('EMAIL_USERNAME') or input('\nEnter email username: ')
-EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD') or getpass('\nEnter email password: ')
+EMAIL_USERNAME = os.environ.get('EMAIL_USERNAME')
+EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD')
 EMAIL_RECEIVERS = [EMAIL_USERNAME]

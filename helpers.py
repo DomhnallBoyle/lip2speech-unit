@@ -1,3 +1,5 @@
+import collections
+import pickle
 import shutil
 import subprocess
 import sys
@@ -13,7 +15,7 @@ import config
 sys.path.extend([str(config.REPOS_PATH), str(config.SV2S_PATH)])
 from sv2s.asr import WhisperASR
 from sv2s.denoise import denoise_audio
-from sv2s.detector import filter_landmarks, get_face_landmarks, get_mouth_frames, init_facial_detectors
+from sv2s.detector import filter_landmarks, get_face_landmarks as get_ibug_landmarks, get_mouth_frames, init_facial_detectors as init_ibug_facial_detectors
 from sv2s.utils import convert_fps, convert_video_codecs, crop_video, get_fps, get_sample_rate, get_speaker_embedding, \
     get_video_duration, get_viseme_distance, get_words_to_visemes_d, load_groundtruth_data, overlay_audio, split_list
 
@@ -42,6 +44,54 @@ def time_wrapper(f, *args, **kwargs):
     time_taken = round(time.time() - start_time, 2)
 
     return f_out, time_taken
+
+
+def queue_frame(redis_cache, frame_index, frame, face_close_up=True):
+    # for streaming, assume face close-up
+    item = (frame_index, frame, face_close_up)
+    redis_cache.rpush(config.REDIS_FRAME_QUEUE, pickle.dumps(item))
+
+
+def dequeue_landmarks(redis_cache, max_frames_lambda):
+    frame_indexes = []
+    video_landmarks = collections.defaultdict(list)
+    i = 0
+    while i < max_frames_lambda():
+        item = redis_cache.lpop(config.REDIS_LANDMARK_QUEUE)
+        if not item:
+            continue
+
+        frame_index, frame_landmarks = pickle.loads(item)
+
+        frame_indexes.append(frame_index)
+        video_landmarks['bbox'].append(frame_landmarks['bbox'])
+        video_landmarks['landmarks'].append(frame_landmarks['landmarks'])
+        video_landmarks['landmarks_scores'].append(frame_landmarks['landmarks_scores'])
+
+        i += 1
+
+    # order landmarks correctly
+    sorted_indexes = np.argsort(frame_indexes)
+    for v in video_landmarks.values():
+        v = np.asarray(v, dtype=object)[sorted_indexes].tolist()
+
+    num_frames = len(video_landmarks['landmarks'])
+    assert num_frames == max_frames_lambda(), f'{num_frames} landmarks != {max_frames_lambda()} frames'
+
+    # TODO: won't need to filter landmarks if using video because POI already found
+    return filter_landmarks(video_landmarks), sorted_indexes, video_landmarks['bbox']
+
+
+def get_landmarks(redis_cache, video_path, max_frames, face_close_up=True):
+    # reset queues
+    for q in [config.REDIS_VIDEO_QUEUE, config.REDIS_LANDMARK_QUEUE]:
+        redis_cache.delete(q) 
+
+    # queue the video
+    item = (video_path, face_close_up)
+    redis_cache.rpush(config.REDIS_VIDEO_QUEUE, pickle.dumps(item))
+
+    return dequeue_landmarks(redis_cache=redis_cache, max_frames_lambda=lambda: max_frames)[0]
 
 
 def frame_to_bytes(frame):

@@ -14,7 +14,7 @@ def main(args):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     l2s_directory = Path(args.l2s_directory)
-    sv2s_directory = Path(args.sv2s_directory)
+    compare_to_directory = Path(args.compare_to_directory)
 
     output_d_name = 'pred_asr'
     if args.denoise_and_normalise:
@@ -29,8 +29,8 @@ def main(args):
     words_to_visemes_d = get_words_to_visemes_d()
 
     l2s_audio_paths = list(l2s_directory.joinpath('pred_wav/test').glob('*.wav'))
-    l2s_wers, sv2s_wers = [], []
-    l2s_vdists, sv2s_vdists = [], []
+    l2s_wers, compare_wers = [], []
+    l2s_vdists, compare_vdists = [], []
 
     for l2s_audio_path in tqdm(l2s_audio_paths): 
         name = l2s_audio_path.stem
@@ -58,40 +58,48 @@ def main(args):
                 for pred in l2s_preds:
                     f.write(f'{pred}\n')
 
-        sv2s_preds_path = sv2s_directory.joinpath(f'{name}/Whisper_asr_results.txt')
-        if not sv2s_preds_path.exists():
-            continue
-        with sv2s_preds_path.open('r') as f:
-            sv2s_preds = f.read().splitlines()
+        # get preds to compare to - could be sv2s or l2s
+        compare_preds_path = compare_to_directory.joinpath(f'{name}/Whisper_asr_results.txt')  # sv2s
+        if not compare_preds_path.exists():
+            compare_preds_path = compare_to_directory.joinpath(output_d_name).joinpath(f'{name}_whisper_asr_results.txt')  # l2s
+            if not compare_preds_path.exists():
+                continue
+        with compare_preds_path.open('r') as f:
+            compare_preds = f.read().splitlines()
 
-        gt = gt_df[gt_df['Video Name'] == name]['Phrase'].values[0]
+        try:
+            gt = gt_df[gt_df['Video Name'] == name]['Phrase'].values[0]
+        except IndexError as e:
+            print(f'{name} does not exist in groundtruth...')
+            raise e
         l2s_pred = l2s_preds[0]
-        sv2s_pred = sv2s_preds[0]
-        print(f'"{gt}" - "{l2s_pred}" - "{sv2s_pred}"')
+        compare_pred = compare_preds[0]
+        print(f'"{gt}" - "{l2s_pred}" - "{compare_pred}"')
 
         l2s_wers.append(calculate_wer(gt, l2s_pred))
-        sv2s_wers.append(calculate_wer(gt, sv2s_pred))
+        compare_wers.append(calculate_wer(gt, compare_pred))
 
-        l2s_vdist, sv2s_vdist = None, None
+        l2s_vdist, compare_vdist = None, None
         try:
             l2s_vdist = get_viseme_distance(gt, l2s_pred, words_to_visemes_d)
-            sv2s_vdist = get_viseme_distance(gt, sv2s_pred, words_to_visemes_d)
+            compare_vdist = get_viseme_distance(gt, compare_pred, words_to_visemes_d)
         except KeyError:
             continue
         l2s_vdists.append(l2s_vdist)
-        sv2s_vdists.append(sv2s_vdist)
+        compare_vdists.append(compare_vdist)
 
-    assert len(l2s_wers) == len(sv2s_wers)
-    assert len(l2s_vdists) == len(sv2s_vdists)
+    assert len(l2s_wers) == len(compare_wers)
+    assert len(l2s_vdists) == len(compare_vdists)
 
-    print('L2S:', np.mean(l2s_wers), np.mean(l2s_vdists))
-    print('SV2S:', np.mean(sv2s_wers), np.mean(sv2s_vdists))
+    print('Total tests:', len(l2s_wers))
+    print(f'{args.l2s_directory}: WER {np.mean(l2s_wers):.3f}, VDIST {np.mean(l2s_vdists):.3f}')
+    print(f'{args.compare_to_directory}: WER {np.mean(compare_wers):.3f}, VDIST {np.mean(compare_vdists):.3f}')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('l2s_directory')
-    parser.add_argument('sv2s_directory')
+    parser.add_argument('compare_to_directory')  # can be sv2s or l2s directory
     parser.add_argument('groundtruth_path')
     parser.add_argument('--denoise_and_normalise', action='store_true')
 

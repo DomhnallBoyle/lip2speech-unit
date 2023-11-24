@@ -82,7 +82,7 @@ def generate(h, generator, code):
     return audio, rtf
 
 
-def init_worker(queue, arguments):
+def init(arguments):
     import logging
     logging.getLogger().handlers = []
 
@@ -94,7 +94,6 @@ def init_worker(queue, arguments):
     global h
 
     a = arguments
-    idx = queue.get()
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     if a.config_file:
@@ -116,32 +115,14 @@ def init_worker(queue, arguments):
     state_dict_g = load_checkpoint(cp_g)
     generator.load_state_dict(state_dict_g['generator'])
 
-    """
-    if a.code_file is not None:
-        dataset = [x.strip().split('|') for x in open(a.code_file).readlines()]
-
-        def parse_code(c):
-            c = [int(v) for v in c.split(" ")]
-            return [torch.LongTensor(c).numpy()]
-
-        dataset = [(parse_code(x[1]), None, x[0], None) for x in dataset]
-    else:
-        file_list = parse_manifest(a.input_code_file)
-        dataset = MelCodeDataset(file_list, -1, h.code_hop_size, h.mel_hop_size, h.n_fft, h.num_mels, h.hop_size, h.win_size,
-                              h.sampling_rate, h.fmin, h.fmax, n_cache_reuse=0,
-                              fmax_loss=h.fmax_for_loss, device=device,
-                              multispkr=h.get('multispkr', None),
-                              pad=a.pad,
-                              code_dict_path=h.code_dict_path)
-    """
-
     os.makedirs(a.output_dir, exist_ok=True)
 
     generator.eval()
     generator.remove_weight_norm()
 
     # fix seed
-    seed = 52 + idx
+    # seed = 52 + idx
+    seed = 52
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -207,26 +188,23 @@ def main():
         print(f"Didn't find checkpoints for {cp_g}")
         return
 
-    ids = list(range(8))
-    manager = Manager()
-    idQueue = manager.Queue()
-    for i in ids:
-        idQueue.put(i)
+    init(a)
 
-    init_worker(idQueue, a)
+    global dataset
+    dataset = MelCodeDataset(
+        ([], [], []), -1, h.code_hop_size, h.mel_hop_size, h.n_fft, h.num_mels, h.hop_size, h.win_size,
+        h.sampling_rate, h.fmin, h.fmax, n_cache_reuse=0,
+        fmax_loss=h.fmax_for_loss, device=device,
+        multispkr=h.get('multispkr', None),
+        pad=a.pad,
+        code_dict_path=h.code_dict_path
+    )
 
     @app.post('/vocoder')
     def vocoder():
-        file_list = parse_manifest(a.input_code_file)
         global dataset
-        dataset = MelCodeDataset(file_list, -1, h.code_hop_size, h.mel_hop_size, h.n_fft, h.num_mels, h.hop_size, h.win_size,
-                              h.sampling_rate, h.fmin, h.fmax, n_cache_reuse=0,
-                              fmax_loss=h.fmax_for_loss, device=device,
-                              multispkr=h.get('multispkr', None),
-                              pad=a.pad,
-                              code_dict_path=h.code_dict_path)
-        
-        inference(0)
+        dataset.reset(parse_manifest(a.input_code_file))
+        inference(item_index=0)
     
         return '', HTTPStatus.NO_CONTENT
 

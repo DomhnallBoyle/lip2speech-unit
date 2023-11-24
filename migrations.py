@@ -71,9 +71,31 @@ class ModelMigration(Migration):
             cur.execute('DROP TABLE model')
 
 
+class VSGServiceMigration(Migration):
+
+    def __init__(self):
+        super().__init__()
+
+    def update(self):
+        with self.db as cur:
+            cur.execute('''
+                CREATE TABLE vsg_service_usage(
+                    id TEXT PRIMARY KEY, 
+                    usage_id TEXT, 
+                    email TEXT,
+                    FOREIGN KEY(usage_id) REFERENCES usage(id)
+                )'''
+            )
+
+    def revert(self):
+        with self.db as cur:
+            cur.execute('DROP TABLE vsg_service_usage')
+
+
 def main(args):
     if args.run_type == 'init':
-        for migration in [InitMigration, ModelMigration]:
+        # run migrations in specific order
+        for migration in [InitMigration, ModelMigration, VSGServiceMigration]:
             migration = migration()
             migration.update()
     else:

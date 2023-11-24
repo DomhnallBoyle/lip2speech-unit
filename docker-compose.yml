@@ -37,6 +37,7 @@ services:
             REDIS_HOST: ${REDIS_HOST:-vsg-redis}
             EMAIL_USERNAME: dev
             EMAIL_PASSWORD: 123
+            DEBUG: ${DEBUG:-0}
         volumes:
             - ${REPOS_PATH}:/repos
             - /tmp:/tmp

@@ -30,10 +30,12 @@
                 <div id="audio-selection">
                     <h3>Audio Selection (for speaker characteristics)</h3>
                     <h5>NOTE: Priority is given to an uploaded audio file</h5>
-                    {% for audio_path in audio_paths %}
-                        <audio id="audio-{{ loop.index0 }}" src="{{ audio_path }}" type="audio/wav" controls></audio>
-                        <input type="radio" value="{{ loop.index0 }}" name="checked-audio"/>
-                        <br>
+                    {% for audio_id, audio_name in default_audios.items() %}
+                        <div class="audio-container">
+                            <input type="radio" value="{{ audio_id }}" name="checked-audio"/>
+                            <label class="audio-name">{{ audio_name }}:</label>
+                            <audio src="/audio/{{ audio_id }}" type="audio/wav" controls></audio>
+                        </div><br>
                     {% endfor %}<br>
                     <input id="audio-upload" type="file"/><br>
                 </div>
@@ -110,6 +112,12 @@
         }
         .history-element .history-counter {
             display: inline;
+        }
+        .audio-container {
+            width: 75%;
+        }
+        .audio-container audio {
+            float: right;
         }
     </style>
 
@@ -256,8 +264,7 @@
                 
                 clearInterval(window.sendFrameInterval);
                 
-                getAudioFile(function(audioFile) {
-                    var audioName = (audioFile) ? audioFile.name : null;
+                getAudioInput(function(audioId, audioFile) {
                     var checkpointId = getCheckpointId();
 
                     if (useStreaming) {
@@ -265,7 +272,7 @@
                         var startTime = performance.now();
 
                         objToBinary(audioFile).then((audioBinary) => {
-                            socket.emit("end_stream", checkpointId, audioBinary, audioName, useASR);
+                            socket.emit("end_stream", checkpointId, audioId, audioBinary, useASR);
                         });
                         
                         socket.on("synthesise_response", (response, status_code) => {
@@ -274,7 +281,7 @@
                         });
                     } else {
                         const blob = new Blob(chunks, {type: "video/webm"});
-                        synthesise(blob, audioFile, checkpointId);
+                        synthesise(blob, checkpointId, audioId, audioFile);
                         chunks = [];
                     }
                 });
@@ -303,30 +310,14 @@
             return document.getElementById("checkpoint-source").value;
         }
 
-        function getAudioFile(callback) {
+        function getAudioInput(callback) {
+            var audioId = null;
             var audioFile = document.getElementById("audio-upload").files[0];
-        
-            if (!audioFile) {
-                var checkedAudio = document.querySelector("input[name='checked-audio']:checked");
-                
-                if (checkedAudio) {
-                    var checkedAudioIndex = checkedAudio.value;
+            var checkedAudio = document.querySelector("input[name='checked-audio']:checked");
+            if (checkedAudio)
+                audioId = checkedAudio.value;
 
-                    var audioElement = document.getElementById("audio-" + checkedAudioIndex);
-                    var xhr = new XMLHttpRequest();
-                    xhr.open("GET", audioElement.src);
-                    xhr.responseType = "arraybuffer";
-                    xhr.onload = e => {
-                        var audioFileName = audioElement.src.replace(/^.*[\\\/]/, '');
-                        callback(new File([xhr.response], audioFileName));
-                    };
-                    xhr.send();
-                } else {
-                    callback(null);
-                }
-            } else {
-                callback(audioFile);
-            }
+            callback(audioId, audioFile);
         }
 
         function handleResponse(jsonResponse, statusCode, checkpointId, startTime) {
@@ -354,13 +345,16 @@
             resetDOM();
         }
 
-        function synthesise(videoData, audioFile, checkpointId) {
+        function synthesise(videoData, checkpointId, audioId, audioFile) {
             // create form data
             var formData = new FormData();
             formData.append("video", videoData);
             if (audioFile)
                 formData.append("audio", audioFile);
-            formData.append("checkpoint_id", checkpointId);
+
+            var requestArgs = "cid=" + checkpointId + "&asr=" + useASR;
+            if (audioId)
+                requestArgs += "&aid=" + audioId;
 
             // measure time taken
             var startTime;
@@ -369,7 +363,7 @@
             xhr.addEventListener("load", function(event) {
                 handleResponse(xhr.response, xhr.status, checkpointId, startTime);
             });
-            xhr.open("POST", "/synthesise?asr=" + useASR);
+            xhr.open("POST", "/synthesise?" + requestArgs);
             xhr.responseType = "json";
             startTime = performance.now();
             xhr.send(formData);
@@ -391,8 +385,8 @@
                 uploadBtn.disabled = true;
                 uploadBtn.textContent = "Please Wait...";
 
-                getAudioFile(function(audioFile) {
-                    synthesise(videoFile, audioFile, getCheckpointId());
+                getAudioInput(function(audioId, audioFile) {
+                    synthesise(videoFile, getCheckpointId(), audioId, audioFile);
                 });
             }
         }

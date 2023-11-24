@@ -2,6 +2,7 @@
 backend=${BACKEND:-1}
 prod=${PROD:-0}
 daemon=${DAEMON:-0}
+use_email=${USE_EMAIL:-0}
 
 working_dir=/tmp/lip2speech
 avhubert_env=/home/domhnall/Envs/avhubert/bin/activate
@@ -10,18 +11,16 @@ avhubert_dir=/home/domhnall/Repos/lip2speech-unit/avhubert/preparation
 synthesis_dir=/home/domhnall/Repos/lip2speech-unit/multi_target_lip2speech
 vocoder_dir=/home/domhnall/Repos/lip2speech-unit/multi_input_vocoder
 
-echo "Enter email username:";
-read email_username
+if [[ $use_email -eq 1 ]]; then
+    echo "Enter email username:"
+    read email_username
 
-echo "Enter email password:";
-read -s email_password
+    echo "Enter email password:"
+    read -s email_password
 
-# supply defaults
-email_username=${email_username:-dev}
-email_password=${email_password:-123}
-
-export EMAIL_USERNAME=$email_username
-export EMAIL_PASSWORD=$email_password
+    export EMAIL_USERNAME=$email_username
+    export EMAIL_PASSWORD=$email_password
+fi
 
 if [[ $backend -eq 1 ]]; then
 
@@ -35,13 +34,13 @@ if [[ $backend -eq 1 ]]; then
     . $lip2speech_env && cd $synthesis_dir && nohup python inference_new.py --config-dir conf --config-name decode common.user_dir=$synthesis_dir common_eval.path=$synthesis_dir/checkpoints/lip2speech_lrs3_avhubert_multi.pt common_eval.results_path=$working_dir/synthesis_results override.checkpoints_data_path=$synthesis_dir/checkpoints.json override.data=$working_dir/label override.label_dir=$working_dir/label port=5006 >/dev/null 2>&1 &
 
     echo -ne "Waiting for backend..."
-    status_code=0;
+    status_code=0
     while [[ $status_code -ne 200 ]]
     do 
-        status_code=$(curl -s -o /dev/null -I -w "%{http_code}" http://127.0.0.1:5004/checkpoints);
-        sleep 2;
+        status_code=$(curl -s -o /dev/null -I -w "%{http_code}" http://127.0.0.1:5004/checkpoints)
+        sleep 2
     done
-    echo "ready!";
+    echo "ready!"
 fi
 
 echo "Starting server..."

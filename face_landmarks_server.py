@@ -1,6 +1,7 @@
 import argparse
-import os
 import pickle
+import re
+import subprocess
 import time
 
 import cv2
@@ -10,20 +11,27 @@ import redis
 
 import config
 
+VIDEO_INFO_COMMAND = 'ffprobe -i {{video_path}}'
+
 frontal_face_detector = dlib.get_frontal_face_detector()  # HOG
 cnn_face_detector = dlib.cnn_face_detection_model_v1('avhubert/preparation/mmod_human_face_detector.dat')  # MMOD
 landmark_predictor = dlib.shape_predictor('avhubert/preparation/shape_predictor_68_face_landmarks.dat')
 get_face_detections = None
 
-# TODO: do we need to upscale? I don't think CFE does
+# TODO: 
+# use iBUG detector/predictor for VSG service
+# fix scale functionality in FaceDetector - doesn't seem to work for videos > 500
+# use multiple landmark predictors - would need to involve redis?
 
 
-def get_face_detections_frontal(frame):
-    return frontal_face_detector(frame, 1)  # upsamples image 1 time to detect more faces
+def get_face_detections_frontal(frame, upsample_num_times=0):
+    return frontal_face_detector(frame, upsample_num_times=upsample_num_times)
 
 
-def get_face_detections_cnn(frame):
-    rects = cnn_face_detector(frame, 1)
+def get_face_detections_cnn(frame, upsample_num_times=0):
+    # NOTE: with SRAVI, camera will be close to the face - no upsampling needed
+    # with VSG service, faces could be further away in video - upsample frame beforehand
+    rects = cnn_face_detector(frame, upsample_num_times=upsample_num_times)
 
     return [d.rect for d in rects]
 
@@ -48,11 +56,10 @@ class FaceDetector:
     
     def __init__(self, debug=False):
         self.max_size = 500
-        self.pre_crop_face_scale_factor = 1.3
         self.pre_face = Rect()
         self.debug = debug
 
-    def detect(self, frame_index, frame):
+    def detect(self, frame_index, frame, upsample_num_times=0):
         if len(frame.shape) == 3:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -73,10 +80,10 @@ class FaceDetector:
         if self.debug:
             print(f'Frame {frame_index}: using crop_rectangle {crop_rectangle.__dict__}, processed frame {processed_frame.shape} {processed_frame.dtype}')
 
-        if self.pre_crop_face_scale_factor > 0 and self.pre_face.top != -1:
+        if config.FACE_DETECTION_PRE_CROP_FACE_SCALE_FACTOR > 0 and self.pre_face.top != -1:
             pre_width = self.pre_face.right - self.pre_face.left
             pre_height = self.pre_face.bottom - self.pre_face.top
-            size_diff = int((pre_width * self.pre_crop_face_scale_factor) - pre_width)
+            size_diff = int((pre_width * config.FACE_DETECTION_PRE_CROP_FACE_SCALE_FACTOR) - pre_width)
             crop_x = max(0, int(self.pre_face.left - (size_diff / 2)))
             crop_y = max(0, int(self.pre_face.top - (size_diff / 2)))
             crop_width = min(processed_frame.shape[1] - crop_x, pre_width + size_diff)
@@ -88,11 +95,11 @@ class FaceDetector:
         if self.debug:
             print(f'Frame {frame_index}: using crop_rectangle {crop_rectangle.__dict__}, processed frame {processed_frame.shape} {processed_frame.dtype}')
 
-        faces = get_face_detections(frame=processed_frame)  # this returns list of dlib.rectangle
+        faces = get_face_detections(frame=processed_frame, upsample_num_times=upsample_num_times)  # this returns list of dlib.rectangle
         if self.debug:
             print(f'Frame {frame_index}: found {len(faces)} faces')
         if len(faces) == 0:
-            faces = get_face_detections(frame=frame)  # fallback to using the whole frame
+            faces = get_face_detections(frame=frame, upsample_num_times=1)  # fallback to using the whole frame and upsample
             crop_rectangle = Rect(0, 0, 0, 0)
             if self.debug:
                 print(f'Frame {frame_index}: found {len(faces)} faces')
@@ -142,6 +149,40 @@ def get_landmarks(frame, faces):
     return all_coords
 
 
+def get_video_rotation(video_path):
+    cmd = VIDEO_INFO_COMMAND.format(input_video_path=video_path)
+
+    _, stderr = subprocess.Popen(
+        cmd.split(' '),
+        stderr=subprocess.PIPE,
+        close_fds=True
+    ).communicate()
+
+    try:
+        reo_rotation = re.compile('rotate\s+:\s(\d+)')
+        match_rotation = reo_rotation.search(str(stderr))
+        rotation = match_rotation.groups()[0]
+    except AttributeError:
+        # print(f'Rotation not found: {video_path}')
+        return 0
+
+    return int(rotation)
+
+
+def fix_frame_rotation(frame, rotation):
+    fix_rotations_mapping = {
+        90: cv2.ROTATE_90_CLOCKWISE,
+        180: cv2.ROTATE_180,
+        270: cv2.ROTATE_90_COUNTERCLOCKWISE
+    }
+
+    new_rotation = fix_rotations_mapping.get(rotation)
+    if new_rotation:
+        frame = cv2.rotate(frame, new_rotation)
+
+    return frame
+
+
 def get_video_frames(video_path):
     video_capture = cv2.VideoCapture(video_path)
 
@@ -163,10 +204,10 @@ def construct_landmarks_d(faces, all_coords):
     }
 
 
-def process_frame(frame_index, frame):
+def process_frame(frame_index, frame, face_close_up=True):
     # run face and landmark detectors
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = get_face_detections_cnn(frame=gray)
+    faces = get_face_detections_cnn(frame=gray, upsample_num_times=0 if face_close_up else 1)
     all_coords = get_landmarks(frame=gray, faces=faces)
 
     # landmarks will be filtered by largest detected bbox later
@@ -175,20 +216,27 @@ def process_frame(frame_index, frame):
     return [frame_index], [frame_landmarks]
 
 
-def process_video(video_path, debug=False):
-    face_detector = FaceDetector(debug=debug)
+def process_video(video_path, face_close_up=True):
+    face_detector = FaceDetector(debug=config.DEBUG)
     frame_indices, video_landmarks = [], []
+    upsample_num_times = 0 if face_close_up else 1
+
+    print(f'Processing video {video_path} with face close-up {face_close_up}, upsampling {upsample_num_times} times...')
 
     for i, frame in enumerate(get_video_frames(video_path=video_path)):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         if i % config.FACE_DETECTION_ON_NTH_FRAME == 0:
-            face = face_detector.detect(frame_index=i, frame=np.copy(gray))  # only returns 1 face
+            face = face_detector.detect(
+                frame_index=i, 
+                frame=np.copy(gray),
+                upsample_num_times=upsample_num_times
+            )  # only returns 1 face
 
         faces = [face] if face is not None else []
 
-        if debug:
-            print(f'Frame index: {i}, using faces: {[[r.left(), r.top(), r.right(), r.bottom()] for r in faces]}')
+        if config.DEBUG:
+            print(f'Frame index: {i}, {gray.shape}, using faces: {[[r.left(), r.top(), r.right(), r.bottom()] for r in faces]}')
 
         all_coords = get_landmarks(frame=gray, faces=faces)
 
@@ -218,8 +266,9 @@ def server(args):
 
         item = pickle.loads(item)
 
-        if type(item) is str:
-            frame_indices, video_landmarks = process_video(video_path=item)
+        # process media differently based on no. of args
+        if len(item) == 2:
+            frame_indices, video_landmarks = process_video(*item)
         else:
             frame_indices, video_landmarks = process_frame(*item)
 
@@ -229,61 +278,48 @@ def server(args):
             cache.rpush(config.REDIS_LANDMARK_QUEUE, pickle.dumps(item))
 
 
-# def profile(args):
-#     assert os.path.exists(args.video_path)
+def profile(args):
+    global get_face_detections
+    get_face_detections = get_face_detections_cnn
+    face_detector = FaceDetector()
 
-#     cache = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT)
+    total_times = []
+    video_face_times, video_landmark_times = [], []
+    for _ in range(args.num_repeats):
+        round_start_time = time.time()
 
-#     frames = list(get_video_frames(video_path=args.video_path))
+        frame_face_times, frame_landmark_times = [], []
+        for i, frame in enumerate(get_video_frames(video_path=args.video_path)):
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-#     def _profile(name, _get_detections):
-#         global get_detections
-#         get_detections = _get_detections
+            if i % args.skip_nth_frame == 0:
+                start_time = time.time()
+                face = face_detector.detect(
+                    frame_index=i, 
+                    frame=np.copy(gray), 
+                    upsample_num_times=args.upsample_num_times
+                )  # only returns 1 face
+                frame_face_times.append(time.time() - start_time)
 
-#         # profile function call
-#         times = []
-#         for _ in range(args.num_repeats):
-#             start_time = time.time()
-
-#             num_fails = 0
-#             for frame in frames:
-#                 rects, _ = get_face_landmarks(frame=frame)
-#                 if not rects:
-#                     num_fails += 1
-
-#             times.append(time.time() - start_time)
-
-#         print(f'{name} - function call, num frames: {len(frames)}, avg. time: {np.mean(times):.2f}, fail rate: {num_fails / len(frames):.2f}')
-
-#         # profile redis call
-#         times = []
-#         for _ in range(args.num_repeats):
-#             start_time = time.time()
-
-#             for frame_index, frame in enumerate(frames):
-#                 item = (frame_index, frame)
-#                 cache.rpush(config.REDIS_FRAME_QUEUE, pickle.dumps(item))
+            faces = [face] if face is not None else []
             
-#             i, max_frames = 0, frame_index + 1
-#             while i < max_frames:
-#                 item = cache.lpop(config.REDIS_LANDMARK_QUEUE)
-#                 if not item:
-#                     continue
-#                 _, _ = pickle.loads(item)
-#                 i += 1  # keep popping off the list when landmarks become available
+            start_time = time.time()
+            get_landmarks(frame=gray, faces=faces)
+            frame_landmark_times.append(time.time() - start_time)
 
-#             times.append(time.time() - start_time)
+        total_times.append(time.time() - round_start_time)
+        video_face_times.append(sum(frame_face_times))
+        video_landmark_times.append(sum(frame_landmark_times))
 
-#         print(f'{name} - redis queue, num frames: {len(frames)}, avg. time: {np.mean(times):.2f}')
-
-#     _profile('DLIB frontal detector', get_face_detections_frontal)
-#     _profile('DLIB MMOD CNN detector', get_face_detections_cnn)
+    print(f'Face Detection: {np.mean(video_face_times):.2f}')
+    print(f'Landmark Detection: {np.mean(video_landmark_times):.2f}')
+    print(f'Total: {np.mean(total_times):.2f}')
 
 
 def main(args):
     f = {
         'server': server,
-        'profile': None
+        'profile': profile
     }
     f[args.run_type](args)
 
@@ -296,6 +332,8 @@ if __name__ == '__main__':
 
     parser_2 = sub_parsers.add_parser('profile')
     parser_2.add_argument('video_path')
+    parser_2.add_argument('--skip_nth_frame', type=int, default=1)
+    parser_2.add_argument('--upsample_num_times', type=int, default=0)
     parser_2.add_argument('--num_repeats', type=int, default=50)
 
     main(parser.parse_args())

@@ -138,6 +138,11 @@ class MelCodeDataset(CodeDataset):
         if self.use_noise:
             self.noise_factor = noise_factor
 
+    def reset(self, training_files):
+        self.audio_files, self.mel_files, self.codes = training_files
+        if self.multispkr:
+            self.speaker_emb_files = [f.replace('/audio/', '/spk_emb/')[:-4]+'.npy' for f in self.audio_files]
+
     def process_code(self, inp_str):
         inp_toks = inp_str.split()
         return code_to_sequence(inp_toks, self.code_dict, self.collapse_code)
