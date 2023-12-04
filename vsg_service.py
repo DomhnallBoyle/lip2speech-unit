@@ -16,11 +16,11 @@ import requests
 import config
 from db import DB
 from email_client import send_email
-from helpers import WhisperASR, crop_video, extract_audio, get_video_duration, merge_videos
+from helpers import WhisperASR, crop_video_fast, extract_audio, get_video_duration, merge_videos, time_wrapper
 
 MAX_VIDEO_DURATION = config.MAX_VIDEO_DURATION - 0.5  # bit of leeway for decoder success
 MIN_VIDEO_DURATION = 1
-SLEEP_TIME = 10
+SLEEP_TIME = 2
 
 asr = WhisperASR(model='medium.en', device='cpu')
 
@@ -57,11 +57,12 @@ def service(url, uid, email, video_path, audio_path, notify=False, **kwargs):
 
     file_list_path = output_directory.joinpath('file_list.txt')
 
-    video_duration = get_video_duration(video_path)
+    video_duration = get_video_duration(video_path=video_path)
 
     start_time = time.time()
 
-    crop_start_time, cropped_video_index = 0, 0
+    crop_start_time, crop_index = 0, 0
+    video_failed = False
     while crop_start_time < video_duration:
         crop_end_time = crop_start_time + MAX_VIDEO_DURATION
         if crop_end_time > video_duration:
@@ -74,40 +75,48 @@ def service(url, uid, email, video_path, audio_path, notify=False, **kwargs):
         if crop_duration < MIN_VIDEO_DURATION:
             break
 
-        logging.info(f'{uid} - synthesising segment {cropped_video_index + 1} from {crop_start_time} - {crop_end_time}...')
+        logging.info(f'{uid} - synthesising segment {crop_index + 1} from {crop_start_time} - {crop_end_time}...')
 
         # crop video to start and end time
-        cropped_video_path = f'/tmp/cropped_video_{cropped_video_index}.mp4'
-        crop_video(video_path, crop_start_time, crop_end_time, cropped_video_path)
+        cropped_video_path = f'/tmp/cropped_video_{crop_index}.mp4'
+        
+        _, time_taken = time_wrapper(crop_video_fast, video_path, crop_start_time, crop_end_time, cropped_video_path)
+        logging.info(f'{uid} - cropping took {time_taken:.1f} secs...')
 
         # synthesise cropped video
         response = synthesise(url=url, video_path=cropped_video_path, audio_path=audio_path)
         if response.status_code != HTTPStatus.OK:
             logging.error(f'{uid} - Failed synthesis: {response.text}')
-            break
-        video_id = response.json()['videoId']
 
-        # save results
-        synthesised_video_path = f'static/{video_id}.mp4'
-        output_segment_path = output_directory.joinpath(f'{cropped_video_index}.mp4')
-        shutil.copyfile(synthesised_video_path, output_segment_path)
+            # continue synthesising next segment if failed to detect any faces
+            if response.json().get('message') != 'Failed to detect any faces':
+                video_failed = True
+                break
+        else:
+            video_id = response.json()['videoId']
 
-        with file_list_path.open('a') as f:
-            f.write(f'file {output_segment_path.name}\n')
+            # save results
+            synthesised_video_path = f'static/{video_id}.mp4'
+            output_segment_path = output_directory.joinpath(f'{crop_index}.mp4')
+            shutil.copyfile(synthesised_video_path, output_segment_path)
+
+            with file_list_path.open('a') as f:
+                f.write(f'file {output_segment_path.name}\n')
 
         crop_start_time = crop_end_time
-        cropped_video_index += 1
+        crop_index += 1
 
         time.sleep(SLEEP_TIME)  # give other users a chance
 
-    if response.status_code != HTTPStatus.OK:
-        if notify:
+    if video_failed:
+        if notify and config.EMAIL_USERNAME:
             send_email(
                 sender=config.EMAIL_USERNAME,
                 receivers=config.EMAIL_RECEIVERS,
                 subject=f'VSG Service Response - {uid}',
                 content=f'The video has failed, please check the logs.'
             )
+        logging.info(f'{uid} - Failed...')
         return
 
     # stitch synthesised videos together
@@ -139,7 +148,7 @@ def service(url, uid, email, video_path, audio_path, notify=False, **kwargs):
     logging.info(f'{uid} - done, took {time_taken} mins')
 
     # notify liopa personnel of completion
-    if notify:
+    if notify and config.EMAIL_USERNAME:
         send_email(
             sender=config.EMAIL_USERNAME,
             receivers=config.EMAIL_RECEIVERS,
@@ -196,6 +205,7 @@ if __name__ == '__main__':
     parser_2.add_argument('video_path')
     parser_2.add_argument('--uid', default=str(uuid.uuid4()))
     parser_2.add_argument('--audio_path')
+    parser_2.add_argument('--email')
 
     parser_3 = sub_parsers.add_parser('email_client')
     parser_3.add_argument('recipient')

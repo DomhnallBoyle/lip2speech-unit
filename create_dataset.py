@@ -69,6 +69,7 @@ def extract_mel_spec(audio_path):
 
 
 def init_process(process_index, args, sample_paths, already_processed, to_process):
+    extracted_audio_path = f'/tmp/extracted_audio_{process_index}.wav'
     cropped_video_path = f'/tmp/video_cropped_{process_index}.mp4'
     preprocessed_audio_path = f'/tmp/preprocessed_audio_{process_index}.wav'
     resized_video_path = f'/tmp/video_resized_{process_index}.mp4'
@@ -77,11 +78,11 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
         init_ibug_facial_detectors()
 
     # get speaker embedding if applicable
-    _speaker_embedding = None
+    pre_loaded_speaker_embedding = None
     if args.speaker_embedding_path:
-        _speaker_embedding = np.load(args.speaker_embedding_path)
+        pre_loaded_speaker_embedding = np.load(args.speaker_embedding_path)
     elif args.speaker_embedding_audio_path:
-        _speaker_embedding = _get_speaker_embedding(audio_path=args.speaker_embedding_audio_path)
+        pre_loaded_speaker_embedding = _get_speaker_embedding(audio_path=args.speaker_embedding_audio_path)
 
     for sample_path in tqdm(sample_paths):
         if str(sample_path) in already_processed:
@@ -90,9 +91,20 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
         if to_process and str(sample_path) not in to_process:
             continue
 
-        # can't use original mouth frames because they were converted to 20 FPS
-        sample = np.load(sample_path, allow_pickle=True)['sample']
-        video_path, speaker_embedding = sample[0], sample[2]
+        # create dataset from .npz or .mp4 files
+        if sample_path.suffix == '.npz':
+            # can't use original mouth frames because they are 20 FPS
+            sample = np.load(sample_path, allow_pickle=True)['sample']
+            video_path, speaker_embedding = sample[0], sample[2]
+        else:
+            # .mp4
+            video_path = sample_path
+            extract_audio(video_path=video_path, audio_path=extracted_audio_path)
+            if args.denoise_and_normalise:
+                preprocess_audio(audio_path=extracted_audio_path, output_path=preprocessed_audio_path)
+                extracted_audio_path = preprocessed_audio_path
+            speaker_embedding = _get_speaker_embedding(audio_path=extracted_audio_path)
+        
         if args.replace_paths:
             for k, v in args.replace_paths.items():
                 video_path = str(video_path).replace(k, v)
@@ -152,11 +164,11 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
         mel_path = args.mel_spec_directory.joinpath(f'{name}.npy')
         np.save(mel_path, mel)
 
-        # save speaker embedding
+        # save speaker embedding - pre-loaded se given priority
         speaker_embedding_path = args.spk_emb_directory.joinpath(f'{name}.npy')
-        _speaker_embedding = _speaker_embedding if _speaker_embedding is not None else speaker_embedding
-        assert _speaker_embedding.shape == (256,) and _speaker_embedding.dtype == np.float32
-        np.save(speaker_embedding_path, _speaker_embedding)
+        speaker_embedding = pre_loaded_speaker_embedding if pre_loaded_speaker_embedding is not None else speaker_embedding
+        assert speaker_embedding.shape == (256,) and speaker_embedding.dtype == np.float32
+        np.save(speaker_embedding_path, speaker_embedding)
 
         # use better detector if applicable
         face_landmarks = None
@@ -170,7 +182,7 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
 
         if face_landmarks is not None:
             # for testing purposes, just include test samples that have landmarks for every frame
-            # usually, iBUG detector/predictors are very good at extreme poses
+            # usually, iBUG detector/predictors are very good at extreme poses so it usually always has landmarks
             num_invalid_frames = sum([l is None for l in face_landmarks])
             if num_invalid_frames > 0:
                 if config.DEBUG:
@@ -222,7 +234,7 @@ def init(args):
         with args.processed_path.open('r') as f:
             already_processed = set(f.read().splitlines())
 
-    sample_paths = list(dataset_directory.glob('*.npz'))
+    sample_paths = list(getattr(dataset_directory, args.glob)(f'*{args.ext}'))
     if args.num_samples:
         random.shuffle(sample_paths)
         sample_paths = sample_paths[:args.num_samples]
@@ -344,6 +356,8 @@ if __name__ == '__main__':
 
     parser_1 = sub_parser.add_parser('init')
     parser_1.add_argument('output_directory')
+    parser_1.add_argument('--ext', default='.npz')
+    parser_1.add_argument('--glob', default='glob')
     parser_1.add_argument('--resize', action='store_true')
     parser_1.add_argument('--num_processes', type=int, default=1)
     parser_1.add_argument('--use_ibug_for_landmarks', action='store_true')

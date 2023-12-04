@@ -41,6 +41,9 @@ from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codec
 #   - would need to remove same frames in original video too for a/v synchronisation
 # think about how stats will work, where will videos be saved etc
 # containerise vsg
+# parallel requests (no semaphores) - becomes an issue when VSG service being used
+# allow default voice picking on VSG page
+# RAM very high when using vsg service
 
 asr = WhisperASR(model='base.en', device='cpu')
 sem = threading.Semaphore()
@@ -505,7 +508,9 @@ def create_app(args=None, args_path=None):
 
     @app.get('/vsg')
     def vsg():
-        return render_template('vsg.html')
+        return render_template('vsg.html', **{
+            'default_audios': default_audios_lookup,
+        })
     
     @app.post('/dzupload')
     def upload():
@@ -572,12 +577,13 @@ def create_app(args=None, args_path=None):
         }))
 
         # notify liopa personnel of request
-        send_email(
-            sender=config.EMAIL_USERNAME,
-            receivers=config.EMAIL_RECEIVERS,
-            subject=f'VSG Service Request - {upload_id}',
-            content=f'{email} has requested to use the VSG service.\nThe uploaded video and audio paths are located in {video_path} and {audio_path} respectively.'
-        )
+        if config.EMAIL_USERNAME:
+            send_email(
+                sender=config.EMAIL_USERNAME,
+                receivers=config.EMAIL_RECEIVERS,
+                subject=f'VSG Service Request - {upload_id}',
+                content=f'{email} has requested to use the VSG service.\nThe uploaded video and audio paths are located in {video_path} and {audio_path} respectively.'
+            )
 
         return {'message': 'Your request has been submitted successfully\nKeep checking your email for updates'}, HTTPStatus.OK
 

@@ -15,7 +15,7 @@ VIDEO_INFO_COMMAND = 'ffprobe -i {{video_path}}'
 
 frontal_face_detector = dlib.get_frontal_face_detector()  # HOG
 cnn_face_detector = dlib.cnn_face_detection_model_v1('avhubert/preparation/mmod_human_face_detector.dat')  # MMOD
-landmark_predictor = dlib.shape_predictor('avhubert/preparation/shape_predictor_68_face_landmarks.dat')
+landmark_predictor = dlib.shape_predictor(f'avhubert/preparation/{config.DLIB_SHAPE_PREDICTOR}')
 get_face_detections = None
 
 # TODO: 
@@ -57,6 +57,7 @@ class FaceDetector:
     def __init__(self, debug=False):
         self.max_size = 500
         self.pre_face = Rect()
+        self.get_face_detections = get_face_detections_cnn
         self.debug = debug
 
     def detect(self, frame_index, frame, upsample_num_times=0):
@@ -95,11 +96,11 @@ class FaceDetector:
         if self.debug:
             print(f'Frame {frame_index}: using crop_rectangle {crop_rectangle.__dict__}, processed frame {processed_frame.shape} {processed_frame.dtype}')
 
-        faces = get_face_detections(frame=processed_frame, upsample_num_times=upsample_num_times)  # this returns list of dlib.rectangle
+        faces = self.get_face_detections(frame=processed_frame, upsample_num_times=upsample_num_times)  # this returns list of dlib.rectangle
         if self.debug:
             print(f'Frame {frame_index}: found {len(faces)} faces')
         if len(faces) == 0:
-            faces = get_face_detections(frame=frame, upsample_num_times=1)  # fallback to using the whole frame and upsample
+            faces = self.get_face_detections(frame=frame, upsample_num_times=1)  # fallback to using the whole frame and upsample
             crop_rectangle = Rect(0, 0, 0, 0)
             if self.debug:
                 print(f'Frame {frame_index}: found {len(faces)} faces')
@@ -141,10 +142,19 @@ def get_landmarks(frame, faces):
     for face in faces:
         shape = landmark_predictor(frame, face)
 
-        coords = np.zeros((68, 2), dtype=np.int32)
-        for i in range(0, 68):
-            coords[i] = (shape.part(i).x, shape.part(i).y) 
-        all_coords.append(coords.tolist())
+        coords = np.zeros((shape.num_parts, 2), dtype=np.int32)
+        for i in range(shape.num_parts):
+            coords[i] = (shape.part(i).x, shape.part(i).y)
+        coords = coords.tolist()
+
+        # custom predictor = inner face (eyes, nose and mouth)
+        if config.DLIB_IS_CUSTOM_SHAPE_PREDICTOR:
+            num_outer_face_points = config.DLIB_NUM_SHAPE_PREDICTOR_POINTS - len(coords)
+            coords = ([(0, 0)] * num_outer_face_points) + coords
+
+        assert len(coords) == config.DLIB_NUM_SHAPE_PREDICTOR_POINTS, f'{len(coords)} != {config.DLIB_NUM_SHAPE_PREDICTOR_POINTS}'
+
+        all_coords.append(coords)
     
     return all_coords
 
@@ -249,8 +259,8 @@ def process_video(video_path, face_close_up=True):
 
 
 def server(args):
-    global get_face_detections
-    get_face_detections = get_face_detections_cnn
+    print(f'Using shape predictor: {config.DLIB_SHAPE_PREDICTOR}')
+    print(f'Is custom shape predictor: {config.DLIB_IS_CUSTOM_SHAPE_PREDICTOR}')
 
     cache = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT)
 
@@ -279,8 +289,6 @@ def server(args):
 
 
 def profile(args):
-    global get_face_detections
-    get_face_detections = get_face_detections_cnn
     face_detector = FaceDetector()
 
     total_times = []

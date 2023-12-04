@@ -17,7 +17,21 @@
                 <li>Upload a video that contains lip-movements that you wish to generate audio for</li>
                 <li>If you wish to generate audio in a specific voice, you can upload an audio file too</li>
                 <li>When completed, a link will be emailed to you where you can retrieve the video with overlayed audio</li>
+                <li>The max. file size is <strong>5gb</strong></li>
             </ul>
+        </div>
+
+        <hr>
+
+        <div id="audio-selection">
+            <h3>Audio Selection (for speaker characteristics):</h3>
+            <p>You can use any of our default speaker audios if you wish:</p>
+            {% for audio_id, audio_name in default_audios.items() %}
+                <div class="audio-container">
+                    <label class="audio-name">{{ audio_name }}:</label>
+                    <audio src="/audio/{{ audio_id }}" type="audio/wav" draggable="true" controls></audio>
+                </div><br>
+            {% endfor %}<br>
         </div>
 
         <hr><br>
@@ -50,6 +64,14 @@
         .dz-error-message span {
             color: black;
         }
+
+        .audio-container {
+            width: 25%;
+        }
+        
+        .audio-container audio {
+            float: right;
+        }
     </style>
 
     <script>
@@ -75,9 +97,10 @@
             paramName: "file",
             chunking: true,
             forceChunking: true,
-            chunkSize: 1000000, // 1 MB
+            chunkSize: 1000000, // in bytes ~= 1 MB
             autoProcessQueue: false,
             maxFiles: 2,
+            maxFilesize: 5 * 1024,  // in MB ~= 5k MB ~= 5 GB 
             dictDefaultMessage: "Drop you video and audio (optional) files here to upload",
             renameFile: function (file) {
                 return uuidv4();
@@ -106,6 +129,16 @@
                 });
 
                 this.on("queuecomplete", function (file) {
+                    // solve for dropzone.js bug : https://github.com/enyo/dropzone/issues/578
+                    // this event sometimes fires when an invalid file is uploaded e.g. > maxFilesize
+                    for (var i = 0; i < myDropzone.files.length; i++) {
+                        if (myDropzone.files[i].status != Dropzone.SUCCESS) {
+                            fireToast("Invalid file uploaded", "error");
+                            myDropzone.removeAllFiles();
+                            return;
+                        }
+                    }
+
                     sendForm(email);
                 });
             }

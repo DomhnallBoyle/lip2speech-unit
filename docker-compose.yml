@@ -34,13 +34,14 @@ services:
                 DLIB_VERSION: ${DLIB_VERSION:-19.17}
         image: liopa/vsg-dlib
         environment:
+            DLIB_SHAPE_PREDICTOR: ${DLIB_SHAPE_PREDICTOR:-shape_predictor_68_face_landmarks.dat}
             REDIS_HOST: ${REDIS_HOST:-vsg-redis}
             EMAIL_USERNAME: dev
             EMAIL_PASSWORD: 123
             DEBUG: ${DEBUG:-0}
         volumes:
             - ${REPOS_PATH}:/repos
-            - /tmp:/tmp
+            - ${DLIB_VIDEOS_PATH:-/tmp}:/tmp
         networks: 
             - vsg-network
         deploy:

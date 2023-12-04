@@ -14,7 +14,7 @@ def main(args):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     l2s_directory = Path(args.l2s_directory)
-    compare_to_directory = Path(args.compare_to_directory)
+    compare_to_directory = Path(args.compare_to_directory) if args.compare_to_directory else None
 
     output_d_name = 'pred_asr'
     if args.denoise_and_normalise:
@@ -23,7 +23,7 @@ def main(args):
     l2s_preds_directory = l2s_directory.joinpath(output_d_name)
     l2s_preds_directory.mkdir(exist_ok=True)
 
-    asr = WhisperASR(model='medium', device=device)
+    asr = WhisperASR(model=args.whisper_model, language=args.whisper_language, device=device)
     gt_df = load_groundtruth_data(args.groundtruth_path)[0]
 
     words_to_visemes_d = get_words_to_visemes_d()
@@ -59,13 +59,16 @@ def main(args):
                     f.write(f'{pred}\n')
 
         # get preds to compare to - could be sv2s or l2s
-        compare_preds_path = compare_to_directory.joinpath(f'{name}/Whisper_asr_results.txt')  # sv2s
-        if not compare_preds_path.exists():
-            compare_preds_path = compare_to_directory.joinpath(output_d_name).joinpath(f'{name}_whisper_asr_results.txt')  # l2s
+        if compare_to_directory:
+            compare_preds_path = compare_to_directory.joinpath(f'{name}/Whisper_asr_results.txt')  # sv2s
             if not compare_preds_path.exists():
-                continue
-        with compare_preds_path.open('r') as f:
-            compare_preds = f.read().splitlines()
+                compare_preds_path = compare_to_directory.joinpath(output_d_name).joinpath(f'{name}_whisper_asr_results.txt')  # l2s
+                if not compare_preds_path.exists():
+                    continue
+            with compare_preds_path.open('r') as f:
+                compare_preds = f.read().splitlines()
+        else:
+            compare_preds = ['None']
 
         try:
             gt = gt_df[gt_df['Video Name'] == name]['Phrase'].values[0]
@@ -91,16 +94,23 @@ def main(args):
     assert len(l2s_wers) == len(compare_wers)
     assert len(l2s_vdists) == len(compare_vdists)
 
+    l2s_wer, l2s_vdist = np.mean(l2s_wers), np.mean(l2s_vdists)
+    compare_wer, compare_vdist = np.mean(compare_wers), np.mean(compare_vdists)
+    wer_diff, vdist_diff = l2s_wer - compare_wer, l2s_vdist - compare_vdist
+
     print('Total tests:', len(l2s_wers))
-    print(f'{args.l2s_directory}: WER {np.mean(l2s_wers):.3f}, VDIST {np.mean(l2s_vdists):.3f}')
-    print(f'{args.compare_to_directory}: WER {np.mean(compare_wers):.3f}, VDIST {np.mean(compare_vdists):.3f}')
+    print(f'{args.l2s_directory}: WER {l2s_wer:.3f}, VDIST {l2s_vdist:.3f}')
+    print(f'{args.compare_to_directory}: WER {compare_wer:.3f}, VDIST {compare_vdist:.3f}')
+    print(f'Diff to original: {wer_diff:.3f} WER, {vdist_diff:.3f} VDIST')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('l2s_directory')
-    parser.add_argument('compare_to_directory')  # can be sv2s or l2s directory
     parser.add_argument('groundtruth_path')
+    parser.add_argument('--compare_to_directory')  # can be sv2s or l2s directory
     parser.add_argument('--denoise_and_normalise', action='store_true')
+    parser.add_argument('--whisper_model', default='medium')
+    parser.add_argument('--whisper_language', default='en')
 
     main(parser.parse_args())

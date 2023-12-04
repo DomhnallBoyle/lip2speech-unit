@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import timedelta
 
 import cv2
 import ffmpeg
@@ -16,8 +17,8 @@ sys.path.extend([str(config.REPOS_PATH), str(config.SV2S_PATH)])
 from sv2s.asr import WhisperASR
 from sv2s.denoise import denoise_audio
 from sv2s.detector import filter_landmarks, get_face_landmarks as get_ibug_landmarks, get_mouth_frames, init_facial_detectors as init_ibug_facial_detectors
-from sv2s.utils import convert_fps, convert_video_codecs, crop_video, get_fps, get_sample_rate, get_speaker_embedding, \
-    get_video_duration, get_viseme_distance, get_words_to_visemes_d, load_groundtruth_data, overlay_audio, split_list
+from sv2s.utils import convert_fps, convert_video_codecs, crop_video, ffmpeg_time, get_fps, get_sample_rate, get_speaker_embedding, get_video_duration, \
+    get_viseme_distance, get_words_to_visemes_d, load_groundtruth_data, overlay_audio, split_list
 
 FFMPEG_PATH = 'ffmpeg'
 FFMPEG_OPTIONS = '-hide_banner -loglevel error'
@@ -28,8 +29,10 @@ NORMALISE_AUDIO_COMMAND = f'ffmpeg-normalize -f -q {{input_audio_path}} -o {{out
 PAD_AUDIO_START_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -i {{input_audio_path}} -af "adelay={{delay}}000|{{delay}}000" {{output_audio_path}}'  # pads audio with delay seconds of silence
 PAD_AUDIO_END_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -i {{input_audio_path}} -af "apad=pad_dur={{delay}}" {{output_audio_path}}'
 REMOVE_AUDIO_PAD_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -i {{input_audio_path}} -ss 00:00:{{delay}}.000 -acodec pcm_s16le {{output_audio_path}}'  # removes delay seconds of silence
-MERGE_VIDEOS_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -f concat -safe 0 -i {{file_list_path}} -c copy {{output_video_path}}'
+MERGE_VIDEOS_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -f concat -safe 0 -i {{file_list_path}} -c copy {{output_video_path}}'
 RESIZE_VIDEO_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -i {{input_video_path}} -vf scale="{{width}}:{{height}}" {{output_video_path}}'
+CROP_VIDEO_FAST_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -ss {{start_time}} -to {{end_time}} -i {{input_video_path}} {{output_video_path}}'
+CROP_VIDEO_MULTIPLE_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -i {{input_video_path}} {{crop_params}}'
 
 INVALID_VIDEO_FORMATS = ['image2', 'tty', 'ico', 'gif', 'pipe']
 
@@ -121,7 +124,32 @@ def is_valid_file(file_path, select_stream='video'):
     return len(specific_streams) == 1 and len(all_streams) < 2
 
 
+def crop_video_multiple(video_path, segments):
+    # crop multiple segments during 1 ffmpeg execution
+    params = ''
+    for crop_start_time, crop_end_time, cropped_video_path in segments:
+        params += f' -ss {ffmpeg_time(crop_start_time)} -to {ffmpeg_time(crop_end_time)} {cropped_video_path}'
+
+    run_command(CROP_VIDEO_MULTIPLE_COMMAND.format(
+        input_video_path=video_path,
+        crop_params=params
+    ))
+
+
+def crop_video_fast(video_path, crop_start_time, crop_end_time, output_video_path):
+    # NOTE: if you put the crop start and end times before the input file, it runs a fast seek
+    run_command(CROP_VIDEO_FAST_COMMAND.format(
+        start_time=ffmpeg_time(crop_start_time),
+        end_time=ffmpeg_time(crop_end_time),
+        input_video_path=video_path,
+        output_video_path=output_video_path
+    ))
+
+
 def merge_videos(file_list_path, output_video_path):
+    # requires file list containing:
+    # file <path_1>
+    # file <path_2> etc...
     run_command(MERGE_VIDEOS_COMMAND.format(
         file_list_path=file_list_path,
         output_video_path=output_video_path
