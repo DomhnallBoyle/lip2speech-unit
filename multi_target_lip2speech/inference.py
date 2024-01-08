@@ -68,6 +68,7 @@ class InferConfig(FairseqDataclass):
             "help": "if true, assumes we are using ax for tuning and returns a tuple for ax to consume"
         },
     )
+    fp16: bool = field(default=False)
 
 def main(cfg: DictConfig):
 
@@ -141,6 +142,8 @@ def _main(cfg, output_file):
         task.cfg.data = cfg.override.data
     if cfg.override.label_dir is not None:
         task.cfg.label_dir = cfg.override.label_dir
+    task.cfg.fp16 = cfg.fp16
+
     task.load_dataset(cfg.dataset.gen_subset, task_cfg=saved_cfg.task)
 
     lms = [None]

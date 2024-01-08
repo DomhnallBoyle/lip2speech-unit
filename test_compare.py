@@ -9,6 +9,7 @@ from tqdm import tqdm
 import config
 from helpers import WhisperASR, get_viseme_distance, get_words_to_visemes_d, load_groundtruth_data, preprocess_audio
 
+# TODO: normalise contractions e.g. don't = do not
 
 def main(args):
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -23,10 +24,10 @@ def main(args):
     l2s_preds_directory = l2s_directory.joinpath(output_d_name)
     l2s_preds_directory.mkdir(exist_ok=True)
 
-    asr = WhisperASR(model=args.whisper_model, language=args.whisper_language, device=device)
+    asr = WhisperASR(model=args.whisper_model, language=args.language, device=device)
     gt_df = load_groundtruth_data(args.groundtruth_path)[0]
 
-    words_to_visemes_d = get_words_to_visemes_d()
+    words_to_visemes_d = get_words_to_visemes_d(language=args.language)
 
     l2s_audio_paths = list(l2s_directory.joinpath('pred_wav/test').glob('*.wav'))
     l2s_wers, compare_wers = [], []
@@ -68,7 +69,7 @@ def main(args):
             with compare_preds_path.open('r') as f:
                 compare_preds = f.read().splitlines()
         else:
-            compare_preds = ['None']
+            compare_preds = ['none']
 
         try:
             gt = gt_df[gt_df['Video Name'] == name]['Phrase'].values[0]
@@ -84,8 +85,8 @@ def main(args):
 
         l2s_vdist, compare_vdist = None, None
         try:
-            l2s_vdist = get_viseme_distance(gt, l2s_pred, words_to_visemes_d)
-            compare_vdist = get_viseme_distance(gt, compare_pred, words_to_visemes_d)
+            l2s_vdist = get_viseme_distance(gt, l2s_pred, words_to_visemes_d, skip_words=args.vdist_skip_words)
+            compare_vdist = get_viseme_distance(gt, compare_pred, words_to_visemes_d, skip_words=args.vdist_skip_words)
         except KeyError:
             continue
         l2s_vdists.append(l2s_vdist)
@@ -111,6 +112,7 @@ if __name__ == '__main__':
     parser.add_argument('--compare_to_directory')  # can be sv2s or l2s directory
     parser.add_argument('--denoise_and_normalise', action='store_true')
     parser.add_argument('--whisper_model', default='medium')
-    parser.add_argument('--whisper_language', default='en')
+    parser.add_argument('--language', default='en')
+    parser.add_argument('--vdist_skip_words', action='store_true')
 
     main(parser.parse_args())

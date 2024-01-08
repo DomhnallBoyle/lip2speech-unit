@@ -5,11 +5,13 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import timedelta
+import uuid
 
 import cv2
 import ffmpeg
 import numpy as np
+import requests
+import syllables
 
 import config
 
@@ -17,8 +19,9 @@ sys.path.extend([str(config.REPOS_PATH), str(config.SV2S_PATH)])
 from sv2s.asr import WhisperASR
 from sv2s.denoise import denoise_audio
 from sv2s.detector import filter_landmarks, get_face_landmarks as get_ibug_landmarks, get_mouth_frames, init_facial_detectors as init_ibug_facial_detectors
+from sv2s.preprocessor import generate_speaker_content_mapping, get_speaker_embedding_video_path
 from sv2s.utils import convert_fps, convert_video_codecs, crop_video, ffmpeg_time, get_fps, get_sample_rate, get_speaker_embedding, get_video_duration, \
-    get_viseme_distance, get_words_to_visemes_d, load_groundtruth_data, overlay_audio, split_list
+    get_viseme_distance, get_words_to_phonemes_d, get_words_to_visemes_d, load_groundtruth_data, overlay_audio, split_list
 
 FFMPEG_PATH = 'ffmpeg'
 FFMPEG_OPTIONS = '-hide_banner -loglevel error'
@@ -33,12 +36,36 @@ MERGE_VIDEOS_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -f concat -safe 0 -i 
 RESIZE_VIDEO_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -i {{input_video_path}} -vf scale="{{width}}:{{height}}" {{output_video_path}}'
 CROP_VIDEO_FAST_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -ss {{start_time}} -to {{end_time}} -i {{input_video_path}} {{output_video_path}}'
 CROP_VIDEO_MULTIPLE_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -i {{input_video_path}} {{crop_params}}'
+VIDEO_SPEED_ALTER_COMMAND = f'{FFMPEG_PATH} {FFMPEG_OPTIONS} -y -i {{input_video_path}} -filter_complex "[0:v]setpts={{video_speed}}*PTS[v];[0:a]atempo={{audio_speed}}[a]" -map "[v]" -map "[a]" {{output_video_path}}'
 
 INVALID_VIDEO_FORMATS = ['image2', 'tty', 'ico', 'gif', 'pipe']
 
 
 def run_command(s):
     subprocess.run(s, shell=True)
+
+
+def synthesise(host, video_path, asr=True, log=False):
+    with open(video_path, 'rb') as f:
+        response = requests.post(f'{host}/synthesise?asr={int(asr)}&log={int(log)}', files={'video': f.read()}, verify=False)
+
+    return response
+
+
+def num_transcript_syllables(transcript, **kwargs):
+    return sum([syllables.estimate(w) for w in transcript.split(' ')])
+
+
+def num_transcript_phonemes(transcript, words_to_phonemes_d, **kwargs):
+    return sum([len(words_to_phonemes_d[word]) for word in transcript.split(' ')])
+
+
+def calculate_ros(transcript, duration, ros_f, debug=False, **kwargs):
+    quantity = ros_f(transcript, **kwargs)
+    if debug:
+        print(f'ASR: {transcript}, #: {quantity}, Duration: {duration}')
+
+    return quantity / duration
 
 
 def time_wrapper(f, *args, **kwargs):
@@ -49,18 +76,18 @@ def time_wrapper(f, *args, **kwargs):
     return f_out, time_taken
 
 
-def queue_frame(redis_cache, frame_index, frame, face_close_up=True):
+def queue_frame(redis_cache, landmark_queue_id, frame_index, frame, face_close_up=True):
     # for streaming, assume face close-up
-    item = (frame_index, frame, face_close_up)
+    item = (landmark_queue_id, (frame_index, frame, face_close_up))
     redis_cache.rpush(config.REDIS_FRAME_QUEUE, pickle.dumps(item))
 
 
-def dequeue_landmarks(redis_cache, max_frames_lambda):
+def dequeue_landmarks(redis_cache, landmark_queue_id, max_frames_lambda):
     frame_indexes = []
     video_landmarks = collections.defaultdict(list)
     i = 0
     while i < max_frames_lambda():
-        item = redis_cache.lpop(config.REDIS_LANDMARK_QUEUE)
+        item = redis_cache.lpop(landmark_queue_id)
         if not item:
             continue
 
@@ -72,6 +99,8 @@ def dequeue_landmarks(redis_cache, max_frames_lambda):
         video_landmarks['landmarks_scores'].append(frame_landmarks['landmarks_scores'])
 
         i += 1
+
+    redis_cache.delete(landmark_queue_id)
 
     # order landmarks correctly
     sorted_indexes = np.argsort(frame_indexes)
@@ -86,15 +115,12 @@ def dequeue_landmarks(redis_cache, max_frames_lambda):
 
 
 def get_landmarks(redis_cache, video_path, max_frames, face_close_up=True):
-    # reset queues
-    for q in [config.REDIS_VIDEO_QUEUE, config.REDIS_LANDMARK_QUEUE]:
-        redis_cache.delete(q) 
-
     # queue the video
-    item = (video_path, face_close_up)
+    landmark_queue_id = str(uuid.uuid4())
+    item = (landmark_queue_id, (video_path, face_close_up))
     redis_cache.rpush(config.REDIS_VIDEO_QUEUE, pickle.dumps(item))
 
-    return dequeue_landmarks(redis_cache=redis_cache, max_frames_lambda=lambda: max_frames)[0]
+    return dequeue_landmarks(redis_cache, landmark_queue_id, max_frames_lambda=lambda: max_frames)[0]
 
 
 def frame_to_bytes(frame):
@@ -192,23 +218,21 @@ def get_updated_dims(width, height):
 
         width = int(height * aspect_ratio)
 
-    assert width <= max_width and height <= max_height, f'({width}, {max_width}) !<= ({height}, {max_height})'
-
     return int(width), int(height)
 
 
-def show_frames(video_frames, face_landmarks, bboxes=None, video_path=None):
-    if not bboxes:
-        bboxes = [[]] * len(video_frames)
-
+def debug_video(video_frames, face_landmarks, bboxes=None, video_path=None, save_path='/tmp/video_debug.mp4', show=False):
     if video_path:
         video_frames = list(get_video_frames(video_path=video_path))
+
+    if not bboxes:
+        bboxes = [[]] * len(video_frames)
 
     debug_frames = []
     for frame, landmarks, bbox in zip(video_frames, face_landmarks, bboxes):
         # draw landmarks
         for x, y in landmarks:
-            frame = cv2.circle(frame, (int(x), int(y)), radius=0, color=(0, 0, 255), thickness=2)
+            frame = cv2.circle(frame, (int(x), int(y)), radius=0, color=(0, 0, 255), thickness=3)
 
         # draw bbox
         for left, top, right, bottom in bbox:
@@ -220,12 +244,15 @@ def show_frames(video_frames, face_landmarks, bboxes=None, video_path=None):
 
         debug_frames.append(frame)
 
-        cv2.imshow('Frame', frame)
-        cv2.waitKey(25)
+        if show:
+            cv2.imshow('Frame', frame)
+            cv2.waitKey(25)
 
-    cv2.destroyAllWindows()
+    if show:
+        cv2.destroyAllWindows()
 
-    save_video(debug_frames, '/tmp/landmarks_debug.mp4', fps=config.FPS, colour=True)
+    if save_path:
+        save_video(debug_frames, save_path, fps=config.FPS, colour=True)
 
 
 def resize_video_opencv(video_path, width, height, fps):
@@ -286,6 +313,21 @@ def get_video_frames(video_path):
 
 def get_num_video_frames(video_path):
     return len(list(get_video_frames(video_path=video_path)))
+
+
+def alter_video_speed(video_path, output_video_path, speed):
+    # https://trac.ffmpeg.org/wiki/How%20to%20speed%20up%20/%20slow%20down%20a%20video
+    # https://superuser.com/a/1520664
+    # 0.5 - half original speed
+    # 100 - 100x original speed
+    assert 0.5 <= speed <= 100, f'Speed needs to be between 0.5 and 100: {speed}'
+
+    run_command(VIDEO_SPEED_ALTER_COMMAND.format(
+        input_video_path=video_path,
+        output_video_path=output_video_path,
+        video_speed=round(1. / speed, 2),
+        audio_speed=float(speed)
+    ))
 
 
 def pad_audio(audio_path, delay, end=False):

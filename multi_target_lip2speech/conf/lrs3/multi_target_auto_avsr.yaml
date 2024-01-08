@@ -75,7 +75,7 @@ lr_scheduler:
   warmup_updates: 10000
 
 model:
-  _name: multi_target
+  _name: multi_target_auto_avsr
   apply_mask: false
   layerdrop: 0.1
   dropout: 0.0

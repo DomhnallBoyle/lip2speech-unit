@@ -30,7 +30,7 @@ import config
 from create_dataset import manifests as create_manifests, vocoder as setup_vocoder_inference
 from email_client import send_email
 from db import DB
-from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codecs, dequeue_landmarks, get_fps, \
+from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codecs, debug_video, dequeue_landmarks, get_fps, \
     get_landmarks, get_mouth_frames, get_num_video_frames, _get_speaker_embedding, get_updated_dims, get_video_frames, \
         get_video_size, is_valid_file, overlay_audio, preprocess_audio as post_process_audio, queue_frame, resize_video, save_video, \
             time_wrapper
@@ -39,17 +39,18 @@ from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codec
 # return full sized video with audio overlayed from resized video
 #   - can't do this atm because frames are removed if missed landmark detections
 #   - would need to remove same frames in original video too for a/v synchronisation
-# think about how stats will work, where will videos be saved etc
 # containerise vsg
 # parallel requests (no semaphores) - becomes an issue when VSG service being used
-# allow default voice picking on VSG page
 # RAM very high when using vsg service
+# fix semaphore locking on failed requests e.g. 500s
+# RAM growing - memory leak in decoders
 
 asr = WhisperASR(model='base.en', device='cpu')
 sem = threading.Semaphore()
 stream_sem = threading.Semaphore()
 video_frames = []
 frame_dims = None
+landmark_queue_id = str(uuid.uuid4())
 
 logging.basicConfig(
     level=logging.INFO,
@@ -100,7 +101,7 @@ def create_app(args=None, args_path=None):
     # move any audio files to static and pre-load speaker embeddings for them
     default_audio_id = None
     speaker_embedding_lookup = {}
-    default_audios_lookup = {}
+    default_audios_list = []
     for audio_name, audio_path in args.default_audios.items():
         audio_path = Path(audio_path)
         assert audio_path.exists(), f'{audio_path} does not exist'
@@ -118,7 +119,10 @@ def create_app(args=None, args_path=None):
         if args.default_audio == audio_name:
             default_audio_id = audio_id
 
-        default_audios_lookup[audio_id] = audio_name
+        default_audios_list.append({
+            'id': audio_id,
+            'name': audio_name
+        })
 
     # get synthesiser checkpoints
     response = execute_request('GET CHECKPOINTS', requests.get, f'http://127.0.0.1:{config.DECODER_PORT}/checkpoints')
@@ -292,6 +296,15 @@ def create_app(args=None, args_path=None):
         if response.status_code != HTTPStatus.NO_CONTENT:
             return {'message': 'Failed to run vocoder'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
+        # overlay landmarks onto video
+        if config.DEBUG:
+            debug_video(
+                video_frames=None,
+                face_landmarks=face_landmarks,
+                video_path=video_raw_path,
+                save_path=video_raw_path
+            )
+
         # post-processing audio - denoise and normalise
         _, time_taken = time_wrapper(post_process_audio,
             audio_path=pred_audio_path,
@@ -344,8 +357,6 @@ def create_app(args=None, args_path=None):
 
         video_frames = []
         frame_dims = None
-        for q in [config.REDIS_FRAME_QUEUE, config.REDIS_LANDMARK_QUEUE]:
-            cache.delete(q)
 
         logging.info('Client connected')
 
@@ -367,7 +378,7 @@ def create_app(args=None, args_path=None):
                 logging.info(f'Resizing frame with (w, h) from ({width}, {height}) to {frame_dims}')
             frame = cv2.resize(frame, frame_dims)  # (width, height)
 
-        queue_frame(redis_cache=cache, frame_index=frame_index, frame=frame)
+        queue_frame(redis_cache=cache, landmark_queue_id=landmark_queue_id, frame_index=frame_index, frame=frame)
         video_frames.append(frame)
 
         emit('response', f'frame {len(video_frames)} received')
@@ -394,7 +405,7 @@ def create_app(args=None, args_path=None):
             temp_file.close()
 
         # max frames keeps growing as lambda is executed constantly in loop
-        face_landmarks, sorted_indexes, _ = dequeue_landmarks(redis_cache=cache, max_frames_lambda=lambda: len(video_frames))
+        face_landmarks, sorted_indexes, _ = dequeue_landmarks(redis_cache=cache, landmark_queue_id=landmark_queue_id, max_frames_lambda=lambda: len(video_frames))
 
         # TODO:
         #  fix error: server=127.0.0.1:5002//socket.io/ client=127.0.0.1:58606 socket shutdown error: [Errno 9] Bad file descriptor
@@ -458,7 +469,7 @@ def create_app(args=None, args_path=None):
     def demo():
         return render_template('demo.html', **{
             'checkpoint_ids': checkpoint_ids,
-            'default_audios': default_audios_lookup,
+            'default_audios': default_audios_list,
             'web_client_run_asr': int(args.web_client_run_asr),
             'web_client_streaming': args.web_client_streaming
         })
@@ -496,7 +507,7 @@ def create_app(args=None, args_path=None):
 
     @app.get('/audios')
     def get_audios():
-        return default_audios_lookup, HTTPStatus.OK
+        return default_audios_list, HTTPStatus.OK
 
     @app.get('/video/<video_id>')
     def get_video(video_id):
@@ -509,7 +520,7 @@ def create_app(args=None, args_path=None):
     @app.get('/vsg')
     def vsg():
         return render_template('vsg.html', **{
-            'default_audios': default_audios_lookup,
+            'default_audios': default_audios_list,
         })
     
     @app.post('/dzupload')

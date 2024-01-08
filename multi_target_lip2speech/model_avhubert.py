@@ -65,6 +65,7 @@ class MultiTargetAVHubertEncoderModel(FairseqEncoderModel):
             "feature_grad_mult": cfg.feature_grad_mult,
         }
 
+        # w2v_path is large_vox_iter5.pt i.e. AV-Hubert pretrained model for frontend
         if cfg.w2v_args is None:
             state = checkpoint_utils.load_checkpoint_to_cpu(
                 cfg.w2v_path, arg_overrides
@@ -92,6 +93,8 @@ class MultiTargetAVHubertEncoderModel(FairseqEncoderModel):
         if state is not None:
             task_pretrain.load_state_dict(state['task_state'])
 
+        # encoder_ here is instance of AVHubertModel in avhubert folder
+        # extract_finetune() called on this instance
         encoder_ = task_pretrain.build_model(w2v_args.model)
 
         encoder = HubertEncoderWrapper(encoder_)
@@ -110,16 +113,33 @@ class MultiTargetAVHubertEncoderModel(FairseqEncoderModel):
         if cfg.use_conformer:
             conformer = Conformer(cfg)
 
+        # i.e. ensure frontend weights add up correctly, should always be true since it's frozen in training
+        sum_weights = 0
+        for name, param in encoder.named_parameters():
+            if 'resnet' in name:
+                sum_weights += param.detach().cpu().numpy().sum()
+        assert round(sum_weights, 4) == -13260.4916, sum_weights
+
+        # calls __init__ here with AV-Hubert encoder frontend
         return cls(encoder, tgt_dict, cfg, conformer)
 
     def forward(self, **kwargs):
+        # NOTE: self.conformer.encoder.frontend is set to None replaced by AV-Hubert encoder frontend
+        # self.conformer.encoder.encoders is still used - these are conformer encoders
+        # self.conformer.decoder does not exist
+
+        # check if using pre-trained Lip2Speech AV-Hubert base model - compare sum of layer weights
+        # cfg.checkpoint_path is usually Lip2Speech AV-Hubert base model to adapt from
+        # this is not hit during inference, cfg.checkpoint_path = None
         if self.cfg.checkpoint_path and not self.completed_first_forward:
             assert round(self.conformer.encoder.encoders[8].conv_module.norm.weight.sum().item(), 4) == 226.4942
             self.completed_first_forward = True
 
+        # decide whether to update AV-Hubert visual frontend params or keep frozen 
         ft = self.freeze_finetune_updates <= self.num_updates
         with torch.no_grad() if not ft else contextlib.ExitStack():
             output = self.encoder(**kwargs)
+
         if self.cfg.use_conformer:
             output = self.conformer(
                 source=output['encoder_out'].repeat_interleave(2, dim=0),
@@ -161,6 +181,7 @@ class Conformer(FairseqEncoder):
     def __init__(self, cfg: AVHubertAsrConfig, tgt_dict=None):
         super().__init__(None)
 
+        # this is ESPNet Conformer which allows you to select 3D ResNet frontend
         self.encoder = Encoder(
             idim=-1,
             attention_dim=cfg.conformer_embed_dim, # adim
@@ -180,7 +201,7 @@ class Conformer(FairseqEncoder):
             relu_type="swish", # relu_type
             a_upsample_ratio=1, # a_upsample_ratio,
         )
-        self.encoder.frontend = None
+        self.encoder.frontend = None  # using frontend from AV-HUBERT, set this to None
 
         d = cfg.conformer_embed_dim
 

@@ -59,7 +59,7 @@ criterion:
   mel_weight: 10
 
 optimization:
-  max_update: 50000
+  max_update: 50000  # these are fairseq params
   lr: [0.001]
   sentence_avg: true
   update_freq: [8] #[1] (for gradient accumulation)

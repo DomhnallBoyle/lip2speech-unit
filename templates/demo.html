@@ -30,11 +30,11 @@
                 <div id="audio-selection">
                     <h3>Audio Selection (for speaker characteristics)</h3>
                     <h5>NOTE: Priority is given to an uploaded audio file</h5>
-                    {% for audio_id, audio_name in default_audios.items() %}
+                    {% for audio in default_audios %}
                         <div class="audio-container">
-                            <input type="radio" value="{{ audio_id }}" name="checked-audio"/>
-                            <label class="audio-name">{{ audio_name }}:</label>
-                            <audio src="/audio/{{ audio_id }}" type="audio/wav" controls></audio>
+                            <input type="radio" value="{{ audio['id'] }}" name="checked-audio"/>
+                            <label class="audio-name">{{ audio['name'] }}:</label>
+                            <audio src="/audio/{{ audio['id'] }}" type="audio/wav" controls></audio>
                         </div><br>
                     {% endfor %}<br>
                     <input id="audio-upload" type="file"/><br>

@@ -5,6 +5,7 @@ import pickle
 import random
 import shutil
 import sys
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -17,10 +18,11 @@ import config
 
 sys.path.append(str(config.FAIRSEQ_PATH))
 from examples.textless_nlp.gslm.unit2speech.tacotron2.layers import TacotronSTFT
-from helpers import convert_fps, crop_video, extract_audio, get_fps, get_ibug_landmarks, \
-    get_landmarks as get_dlib_landmarks, get_mouth_frames, get_num_video_frames, _get_speaker_embedding, \
-        get_updated_dims, get_video_duration, get_video_size, init_ibug_facial_detectors, preprocess_audio, resize_video, \
-            save_video, split_list
+from helpers import alter_video_speed, calculate_ros, convert_fps, crop_video, extract_audio, generate_speaker_content_mapping, \
+    get_fps, get_ibug_landmarks, get_landmarks as get_dlib_landmarks, get_mouth_frames, get_num_video_frames, _get_speaker_embedding, \
+        get_speaker_embedding_video_path, get_updated_dims, get_video_duration, get_video_size, get_words_to_phonemes_d, init_ibug_facial_detectors, \
+            num_transcript_phonemes, preprocess_audio, resize_video, save_video, split_list, synthesise
+
 
 stft = None
 cache = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT)
@@ -51,6 +53,10 @@ def crop_to_random_duration(video_path, num_video_frames, video_duration, max_du
         crop_video(video_path, start_duration, end_duration, cropped_video_path)
         shutil.copyfile(cropped_video_path, video_path)
 
+        num_video_frames = duration_num_frames
+
+    return num_video_frames
+
 
 def extract_mel_spec(audio_path):
     global stft
@@ -68,11 +74,13 @@ def extract_mel_spec(audio_path):
     return mel.T
 
 
-def init_process(process_index, args, sample_paths, already_processed, to_process):
+def init_process(process_index, args, sample_paths):
+    dlib_video_path = f'/tmp/video_{process_index}.mp4'
     extracted_audio_path = f'/tmp/extracted_audio_{process_index}.wav'
     cropped_video_path = f'/tmp/video_cropped_{process_index}.mp4'
     preprocessed_audio_path = f'/tmp/preprocessed_audio_{process_index}.wav'
     resized_video_path = f'/tmp/video_resized_{process_index}.mp4'
+    ros_altered_video_path = f'/tmp/video_ros_{process_index}.mp4'
 
     if args.use_ibug_for_landmarks:
         init_ibug_facial_detectors()
@@ -84,12 +92,9 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
     elif args.speaker_embedding_audio_path:
         pre_loaded_speaker_embedding = _get_speaker_embedding(audio_path=args.speaker_embedding_audio_path)
 
-    for sample_path in tqdm(sample_paths):
-        if str(sample_path) in already_processed:
-            continue
+    words_to_phonemes_d = get_words_to_phonemes_d(language='en')
 
-        if to_process and str(sample_path) not in to_process:
-            continue
+    for sample_path in tqdm(sample_paths):
 
         # create dataset from .npz or .mp4 files
         if sample_path.suffix == '.npz':
@@ -99,7 +104,17 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
         else:
             # .mp4
             video_path = sample_path
-            extract_audio(video_path=video_path, audio_path=extracted_audio_path)
+
+            if args.speaker_content_mapping:
+                speaker_embedding_video_path = get_speaker_embedding_video_path(
+                    speaker_content_mapping=args.speaker_content_mapping, 
+                    video_path=video_path, 
+                    speaker_id_index=args.speaker_id_index, 
+                )
+            else:
+                speaker_embedding_video_path = video_path
+
+            extract_audio(video_path=speaker_embedding_video_path, audio_path=extracted_audio_path)
             if args.denoise_and_normalise:
                 preprocess_audio(audio_path=extracted_audio_path, output_path=preprocessed_audio_path)
                 extracted_audio_path = preprocessed_audio_path
@@ -131,6 +146,7 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
                 video_path = resized_video_path
 
         # copy raw video or convert fps if necessary
+        # ensure not making changes to original video
         raw_video_path = str(args.video_raw_directory.joinpath(f'{name}.mp4'))
         if fps != config.FPS:
             convert_fps(video_path, config.FPS, raw_video_path)
@@ -138,12 +154,38 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
             shutil.copyfile(video_path, raw_video_path)
         video_path = raw_video_path
 
+        # alter ROS if necessary
+        if args.optimum_ros:
+            response = synthesise(host='https://127.0.0.1:5002', video_path=video_path)
+            asr_preds = response.json()['asrPredictions']
+            if not asr_preds:
+                continue
+            try:
+                ros = calculate_ros(
+                    transcript=asr_preds[0], 
+                    duration=get_video_duration(video_path=video_path),
+                    ros_f=num_transcript_phonemes,
+                    words_to_phonemes_d=words_to_phonemes_d
+                )
+            except Exception as e:
+                print('Failed to calculate ROS:', e)
+                continue
+            ros_ratio = args.optimum_ros / ros
+            if not 0.5 <= ros_ratio <= 100:
+                continue
+            alter_video_speed(
+                video_path=video_path,
+                output_video_path=ros_altered_video_path,
+                speed=ros_ratio
+            )
+            shutil.copy(ros_altered_video_path, video_path)
+
         num_video_frames, video_duration = trim_video_to_duration(
             video_path=video_path, 
             cropped_video_path=cropped_video_path
         )
         if args.max_duration:
-            crop_to_random_duration(
+            num_video_frames = crop_to_random_duration(
                 video_path=video_path, 
                 num_video_frames=num_video_frames, 
                 video_duration=video_duration, 
@@ -171,14 +213,15 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
         np.save(speaker_embedding_path, speaker_embedding)
 
         # use better detector if applicable
+        if config.DEBUG: 
+            print('Getting face landmarks...')
         face_landmarks = None
         if args.use_ibug_for_landmarks:
             face_landmarks = get_ibug_landmarks(video_path=video_path, skip_nth_frame=args.skip_nth_frame)[1]
         elif args.use_dlib_for_landmarks:
             # dlib docker image needs video copied to shared volume to access
-            new_video_path = f'/tmp/video_{process_index}.mp4'
-            shutil.copyfile(video_path, new_video_path)
-            face_landmarks = get_dlib_landmarks(redis_cache=cache, video_path=new_video_path, max_frames=num_video_frames)
+            shutil.copyfile(video_path, dlib_video_path)
+            face_landmarks = get_dlib_landmarks(redis_cache=cache, video_path=dlib_video_path, max_frames=num_video_frames)
 
         if face_landmarks is not None:
             # for testing purposes, just include test samples that have landmarks for every frame
@@ -196,6 +239,8 @@ def init_process(process_index, args, sample_paths, already_processed, to_proces
                 mouth_video_path = str(args.video_directory.joinpath(f'{name}.mp4'))
                 face_landmarks = [np.asarray(l) for l in face_landmarks]
                 mouth_frames = get_mouth_frames(video_path=video_path, landmarks=face_landmarks, greyscale=False)
+                if mouth_frames is None:
+                    continue
                 save_video(mouth_frames, mouth_video_path, fps=config.FPS, colour=True)
 
         with args.processed_path.open('a') as f:
@@ -229,22 +274,25 @@ def init(args):
     args.landmarks_directory = landmarks_directory
     args.processed_path = output_directory.joinpath(f'{args.type}_processed.txt')
 
-    already_processed = set()
+    if args.samples_path:
+        with open(args.samples_path, 'r') as f:
+            sample_paths = set(f.read().splitlines())
+    else:
+        sample_paths = list(dataset_directory.glob(args.glob))
+        if args.num_samples:
+            random.shuffle(sample_paths)
+            sample_paths = sample_paths[:args.num_samples]
+
+    # don't redo already processed samples
     if args.processed_path.exists():
         with args.processed_path.open('r') as f:
             already_processed = set(f.read().splitlines())
 
-    sample_paths = list(getattr(dataset_directory, args.glob)(f'*{args.ext}'))
-    if args.num_samples:
-        random.shuffle(sample_paths)
-        sample_paths = sample_paths[:args.num_samples]
+        sample_paths = [p for p in sample_paths if str(p) not in already_processed]
 
-    to_process = set()
-    if args.samples_path:
-        with open(args.samples_path, 'r') as f:
-            to_process = set(f.read().splitlines())
+    args.speaker_content_mapping = generate_speaker_content_mapping(sample_paths, args.speaker_id_index) if args.use_se_content_mapping else None
 
-    tasks = [[i, args, _sample_paths, already_processed, to_process]
+    tasks = [[i, args, _sample_paths]
              for i, _sample_paths in enumerate(split_list(sample_paths, args.num_processes))]
     with multiprocessing.Pool(processes=args.num_processes) as p:
         p.starmap(init_process, tasks)
@@ -295,7 +343,7 @@ def manifests(args):
             f3.write(f'{audio_path}\t{num_audio_frames}\n')
 
     if args.dict_path:
-        shutil.copyfile(args.dict_path, dataset_directory.joinpath('label'))
+        shutil.copy(args.dict_path, dataset_directory.joinpath('label'))
 
 
 def vocoder(args):
@@ -337,49 +385,140 @@ def vocoder(args):
             f2.write(f'{speech_units}\n')
 
 
-def main(args):
+def combine(args):
+    dataset_directory = Path(args.dataset_directory)
+    if dataset_directory.exists():
+        shutil.rmtree(dataset_directory)
+    dataset_directory.mkdir()
+
+    combine_directories = [Path(p) for p in args.directories]
+    assert all([p.exists() for p in combine_directories])
+
+    def combine(p, _type):
+        print(f'Combining {_type} in {str(p)}...')
+
+        # create any new directories if necessary
+        for sub_d in [f'{_type}', f'video/{_type}', f'audio/{_type}', f'spk_emb/{_type}', f'mel/{_type}', 'label']:
+            dataset_directory.joinpath(sub_d).mkdir(exist_ok=True, parents=True)
+
+        # gather tsv and unt lines
+        with p.joinpath(f'label/{_type}.tsv').open('r') as f:
+            tsv_lines = f.read().splitlines()[1:]  # ignore first line (dataset absolute path)
+        
+        with p.joinpath(f'label/{_type}.unt').open('r') as f:
+            unt_lines = f.read().splitlines()
+
+        assert len(tsv_lines) == len(unt_lines)
+
+        # create symlinks, gather new tsv lines
+        new_tsv_lines, new_unt_lines = [], []
+        for tsv_line, unt_line in tqdm(zip(tsv_lines, unt_lines)):
+            name, _, _, num_video_frames, num_audio_frames = tsv_line.split('\t')
+            new_name = f'{_type}/{str(uuid.uuid4())}'
+
+            if not p.joinpath(f'{name}.mp4').exists():
+                continue
+
+            for rel_file_path, new_rel_file_path in zip(
+                [f'{name}.mp4', f'video/{name}.mp4', f'audio/{name}.wav', f'spk_emb/{name}.npy', f'mel/{name}.npy'],
+                [f'{new_name}.mp4', f'video/{new_name}.mp4', f'audio/{new_name}.wav', f'spk_emb/{new_name}.npy', f'mel/{new_name}.npy']
+            ):
+                abs_file_path = p.joinpath(rel_file_path)
+                assert abs_file_path.exists()
+
+                new_abs_file_path = dataset_directory.joinpath(new_rel_file_path)
+                new_abs_file_path.symlink_to(abs_file_path)
+
+            new_tsv_lines.append([new_name, num_video_frames, num_audio_frames])
+            new_unt_lines.append(unt_line)
+
+        new_tsv_file_path = dataset_directory.joinpath(f'label/{_type}.tsv')
+
+        # write header line in new tsv file
+        if not new_tsv_file_path.exists():
+            with new_tsv_file_path.open('w') as f:
+                f.write(f'{str(dataset_directory.resolve())}\n')
+
+        # write new tsv and unt files
+        with new_tsv_file_path.open('a') as f:
+            for name, num_video_frames, num_audio_frames in new_tsv_lines:
+                f.write(f'{name}\tvideo/{name}.mp4\taudio/{name}.wav\t{num_video_frames}\t{num_audio_frames}\n')
+
+        with dataset_directory.joinpath(f'label/{_type}.unt').open('a') as f:
+            for unt in new_unt_lines:
+                f.write(f'{unt}\n')
+
+    # combine directories into 1, including all sub-directories
+    for p in combine_directories:
+        for _type in ['train', 'val', 'test']:
+            if p.joinpath(_type).exists():  # ensure sub-d exists before continuing
+                combine(p, _type)
+
+    # copy the dict path for training
+    shutil.copy(args.dict_path, dataset_directory.joinpath('label'))
+
+
+def create(args):
     f = {
         'init': init,
         'generate_file_list': generate_file_list,
         'manifests': manifests,
-        'vocoder': vocoder
+        'vocoder': vocoder,
+    }
+    f[args.create_type](args)
+
+
+def main(args):
+    f = {
+        'create': create,
+        'combine': combine
     }
     f[args.run_type](args)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('type', choices=['train', 'val', 'test'])
     parser.add_argument('dataset_directory')
 
     sub_parser = parser.add_subparsers(dest='run_type')
 
-    parser_1 = sub_parser.add_parser('init')
-    parser_1.add_argument('output_directory')
-    parser_1.add_argument('--ext', default='.npz')
-    parser_1.add_argument('--glob', default='glob')
-    parser_1.add_argument('--resize', action='store_true')
-    parser_1.add_argument('--num_processes', type=int, default=1)
-    parser_1.add_argument('--use_ibug_for_landmarks', action='store_true')
-    parser_1.add_argument('--skip_nth_frame', type=int, default=1)
-    parser_1.add_argument('--use_dlib_for_landmarks', action='store_true')
-    parser_1.add_argument('--extract_mouth_frames', action='store_true')
-    parser_1.add_argument('--denoise_and_normalise', action='store_true')
-    parser_1.add_argument('--replace_paths', type=lambda s: json.loads(s))
-    parser_1.add_argument('--use_unique_parent_name', action='store_true')
-    parser_1.add_argument('--speaker_embedding_path')
-    parser_1.add_argument('--speaker_embedding_audio_path')
-    parser_1.add_argument('--num_samples', type=int)
-    parser_1.add_argument('--samples_path')
-    parser_1.add_argument('--max_duration', type=int)
-    parser_1.add_argument('--redo', action='store_true')
+    parser_1 = sub_parser.add_parser('create')
+    parser_1.add_argument('type', choices=['train', 'val', 'test'])
 
-    parser_2 = sub_parser.add_parser('generate_file_list')
+    sub_parser_1 = parser_1.add_subparsers(dest='create_type')
 
-    parser_3 = sub_parser.add_parser('manifests')
-    parser_3.add_argument('--dict_path')
+    parser_1a = sub_parser_1.add_parser('init')
+    parser_1a.add_argument('output_directory')
+    parser_1a.add_argument('--glob', default='*.npz')
+    parser_1a.add_argument('--resize', action='store_true')
+    parser_1a.add_argument('--num_processes', type=int, default=1)
+    parser_1a.add_argument('--use_ibug_for_landmarks', action='store_true')
+    parser_1a.add_argument('--skip_nth_frame', type=int, default=1)
+    parser_1a.add_argument('--use_dlib_for_landmarks', action='store_true')
+    parser_1a.add_argument('--extract_mouth_frames', action='store_true')
+    parser_1a.add_argument('--denoise_and_normalise', action='store_true')
+    parser_1a.add_argument('--replace_paths', type=lambda s: json.loads(s))
+    parser_1a.add_argument('--use_unique_parent_name', action='store_true')
+    parser_1a.add_argument('--use_se_content_mapping', action='store_true')
+    parser_1a.add_argument('--speaker_id_index', type=int, default=-2)
+    parser_1a.add_argument('--speaker_embedding_path')
+    parser_1a.add_argument('--speaker_embedding_audio_path')
+    parser_1a.add_argument('--num_samples', type=int)
+    parser_1a.add_argument('--samples_path')
+    parser_1a.add_argument('--max_duration', type=int)
+    parser_1a.add_argument('--optimum_ros', type=float)
+    parser_1a.add_argument('--redo', action='store_true')
 
-    parser_4 = sub_parser.add_parser('vocoder')
-    parser_4.add_argument('synthesis_directory')
+    parser_1b = sub_parser_1.add_parser('generate_file_list')
+
+    parser_1c = sub_parser_1.add_parser('manifests')
+    parser_1c.add_argument('--dict_path')
+
+    parser_1d = sub_parser_1.add_parser('vocoder')
+    parser_1d.add_argument('synthesis_directory')
+
+    parser_2 = sub_parser.add_parser('combine')
+    parser_2.add_argument('directories', type=lambda s: s.split(','))
+    parser_2.add_argument('dict_path')
 
     main(parser.parse_args())

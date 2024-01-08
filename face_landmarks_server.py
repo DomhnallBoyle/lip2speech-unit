@@ -150,7 +150,7 @@ def get_landmarks(frame, faces):
         # custom predictor = inner face (eyes, nose and mouth)
         if config.DLIB_IS_CUSTOM_SHAPE_PREDICTOR:
             num_outer_face_points = config.DLIB_NUM_SHAPE_PREDICTOR_POINTS - len(coords)
-            coords = ([(0, 0)] * num_outer_face_points) + coords
+            coords = ([[0, 0]] * num_outer_face_points) + coords
 
         assert len(coords) == config.DLIB_NUM_SHAPE_PREDICTOR_POINTS, f'{len(coords)} != {config.DLIB_NUM_SHAPE_PREDICTOR_POINTS}'
 
@@ -274,7 +274,7 @@ def server(args):
             time.sleep(config.REDIS_LANDMARK_WAIT_TIME)
             continue
 
-        item = pickle.loads(item)
+        landmark_queue_id, item = pickle.loads(item)
 
         # process media differently based on no. of args
         if len(item) == 2:
@@ -285,7 +285,7 @@ def server(args):
         # queue landmarks
         for frame_index, frame_landmarks in zip(frame_indices, video_landmarks):
             item = (frame_index, frame_landmarks)
-            cache.rpush(config.REDIS_LANDMARK_QUEUE, pickle.dumps(item))
+            cache.rpush(landmark_queue_id, pickle.dumps(item))
 
 
 def profile(args):

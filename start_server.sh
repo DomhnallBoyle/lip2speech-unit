@@ -2,7 +2,9 @@
 backend=${BACKEND:-1}
 prod=${PROD:-0}
 daemon=${DAEMON:-0}
+decoder_cpu=${DECODER_CPU:-1}
 use_email=${USE_EMAIL:-0}
+fp16=${FP16:-true}
 
 working_dir=/tmp/lip2speech
 avhubert_env=/home/domhnall/Envs/avhubert/bin/activate
@@ -25,20 +27,22 @@ fi
 if [[ $backend -eq 1 ]]; then
 
     . $avhubert_env && cd $avhubert_dir && nohup python detect_landmark_new.py --cnn_detector=mmod_human_face_detector.dat --face_predictor=shape_predictor_68_face_landmarks.dat --ffmpeg=/usr/bin/ffmpeg server >/dev/null 2>&1 &
-    . $lip2speech_env && cd $synthesis_dir && nohup python inference_new.py --config-dir conf --config-name decode common.fp16=true common.user_dir=$synthesis_dir common_eval.path=$synthesis_dir/checkpoints/lip2speech_lrs3_avhubert_multi.pt common_eval.results_path=$working_dir/synthesis_results override.checkpoints_data_path=$synthesis_dir/checkpoints.json override.data=$working_dir/label override.label_dir=$working_dir/label fp16=true >/dev/null 2>&1 &
+    . $lip2speech_env && cd $synthesis_dir && nohup python inference_new.py --config-dir conf --config-name decode common.fp16=$fp16 common.user_dir=$synthesis_dir common_eval.path=$synthesis_dir/checkpoints/lip2speech_lrs3_avhubert_multi.pt common_eval.results_path=$working_dir/synthesis_results override.checkpoints_data_path=$synthesis_dir/checkpoints.json override.data=$working_dir/label override.label_dir=$working_dir/label fp16=$fp16 >/dev/null 2>&1 &
     . $lip2speech_env && cd $vocoder_dir && nohup python inference_new.py --input_code_file $working_dir/synthesis_results/vocoder/label/test.tsv --output_dir $working_dir/vocoder_results --checkpoint_file checkpoints/lrs3/multi_input/vocoder_lrs3_multi_aug.pt --config_file configs/lrs3/multi_input_aug.json -n -1 >/dev/null 2>&1 &
     . $lip2speech_env && nohup python vsg_service.py server >/dev/null 2>&1 &
 
-    # VSG service decoder always runs on CPU
-    export CUDA_VISIBLE_DEVICES=''
-    . $lip2speech_env && cd $synthesis_dir && nohup python inference_new.py --config-dir conf --config-name decode common.user_dir=$synthesis_dir common_eval.path=$synthesis_dir/checkpoints/lip2speech_lrs3_avhubert_multi.pt common_eval.results_path=$working_dir/synthesis_results override.checkpoints_data_path=$synthesis_dir/checkpoints.json override.data=$working_dir/label override.label_dir=$working_dir/label port=5006 >/dev/null 2>&1 &
-
+    if [[ $decoder_cpu -eq 1 ]]; then
+        # VSG service decoder always runs on CPU
+        export CUDA_VISIBLE_DEVICES=''
+        . $lip2speech_env && cd $synthesis_dir && nohup python inference_new.py --config-dir conf --config-name decode common.user_dir=$synthesis_dir common_eval.path=$synthesis_dir/checkpoints/lip2speech_lrs3_avhubert_multi.pt common_eval.results_path=$working_dir/synthesis_results override.checkpoints_data_path=$synthesis_dir/checkpoints.json override.data=$working_dir/label override.label_dir=$working_dir/label port=5006 >/dev/null 2>&1 &
+    fi
+    
     echo -ne "Waiting for backend..."
     status_code=0
     while [[ $status_code -ne 200 ]]
     do 
         status_code=$(curl -s -o /dev/null -I -w "%{http_code}" http://127.0.0.1:5004/checkpoints)
-        sleep 2
+        sleep 0.5 
     done
     echo "ready!"
 fi

@@ -26,10 +26,10 @@
         <div id="audio-selection">
             <h3>Audio Selection (for speaker characteristics):</h3>
             <p>You can use any of our default speaker audios if you wish:</p>
-            {% for audio_id, audio_name in default_audios.items() %}
+            {% for audio in default_audios %}
                 <div class="audio-container">
-                    <label class="audio-name">{{ audio_name }}:</label>
-                    <audio src="/audio/{{ audio_id }}" type="audio/wav" draggable="true" controls></audio>
+                    <label class="audio-name">{{ audio['name'] }}:</label>
+                    <audio id="{{ audio['id'] }}" class="sample-audio" src="/audio/{{ audio['id'] }}" type="audio/wav" controls></audio>
                 </div><br>
             {% endfor %}<br>
         </div>

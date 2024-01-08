@@ -1,8 +1,15 @@
-CUDA_VISIBLE_DEVICES=0 \
-PYTHONPATH=/home/js/lip2speech-unit/fairseq \
+label_dir=$1
+results_path=$2
+checkpoint_path=${3:-`pwd`/checkpoints/lip2speech_lrs3_multi.pt}
+cuda=${CUDA_VISIBLE_DEVICES:-0}
+
+CUDA_VISIBLE_DEVICES=$cuda \
+PYTHONPATH=/home/domhnall/Repos/lip2speech-unit/fairseq \
 python -B inference.py \
 --config-dir conf \
 --config-name decode \
 common.user_dir=`pwd` \
-common_eval.path=`pwd`/checkpoints/lip2speech_lrs3_multi.pt \
-common_eval.results_path=`pwd`/results
+common_eval.path=$checkpoint_path \
+common_eval.results_path=$results_path \
+override.data=$label_dir \
+override.label_dir=$label_dir

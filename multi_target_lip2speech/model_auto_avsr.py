@@ -23,35 +23,38 @@ else:
     sys.path.insert(0, Path(__file__).resolve().parent.parent)
     from espnet.nets.pytorch_backend.transformer.encoder import Encoder
     sys.path.pop(0)
+    from .model import MultiTargetAutoAVSREncoderModelConfig, MLP
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class MultiTargetEncoderModelConfig(AVHubertSeq2SeqConfig):
-    checkpoint_path: Optional[str] = field(default=MISSING)
-    use_conformer: bool = field(default=False)
-    conformer_layers: int = field(default=12)
-    conformer_embed_dim: int = field(default=512)
-    conformer_ffn_embed_dim: int = field(default=2048)
-    conformer_attention_heads: int = field(default=8)
-    conformer_dropout: float = field(default=0.1)
-    conformer_attention_dropout: float = field(default=0.1)
-    conformer_layer_norm_first: bool = field(default=True)
-
-@dataclass
-class MultiTargetAutoAVSREncoderModelConfig(MultiTargetEncoderModelConfig):
-    avsr_checkpoint_path: Optional[str] = field(default=MISSING)
-
-@register_model("multi_target", dataclass=MultiTargetAutoAVSREncoderModelConfig)
-class MultiTargetEncoderModel(FairseqEncoderModel):
-    def __init__(self, conformer, tgt_dict, cfg):
-        super().__init__(conformer)
+@register_model("multi_target_auto_avsr", dataclass=MultiTargetAutoAVSREncoderModelConfig)
+class MultiTargetAutoAVSREncoderModel(FairseqEncoderModel):
+    def __init__(self, encoder, tgt_dict, cfg, conformer):
+        super().__init__(encoder)
         self.cfg = cfg
         self.freeze_finetune_updates = cfg.freeze_finetune_updates
+        self.conformer = conformer
+        self.init()
+
+    def init(self):
+        # load auto-avsr model, only the encoder part i.e. ResNet + Conformer
+        auto_avsr_state = torch.load(self.cfg.avsr_checkpoint_path, map_location='cpu')
+        auto_avsr_keys = list(auto_avsr_state.keys())
+        for k in auto_avsr_keys:
+            if any([name in k for name in ['aux', 'decoder', 'fusion', 'ctc']]):
+                del auto_avsr_state[k]
+
+        self.encoder.load_state_dict(auto_avsr_state)
+
+        # freeze auto-avsr encoder params during training
+        for param in self.encoder.parameters():
+            param.requires_grad = False
 
     @classmethod
     def build_model(cls, cfg, task):
         """Build a new model instance."""
+
+        auto_avsr_encoder = AutoAVSREncoder(cfg)
 
         src_dict, tgt_dict = task.source_dictionary, task.target_dictionary
 
@@ -61,12 +64,18 @@ class MultiTargetEncoderModel(FairseqEncoderModel):
         if cfg.use_conformer:
             conformer = Conformer(cfg)
 
-        return cls(conformer, tgt_dict, cfg)
-
+        return cls(auto_avsr_encoder, tgt_dict, cfg, conformer)
 
     def forward(self, **kwargs):
-        if self.cfg.use_conformer:
+        with torch.no_grad():
             output = self.encoder(**kwargs)
+
+        if self.cfg.use_conformer:
+            output = self.conformer(
+                source=output['encoder_out'].repeat_interleave(2, dim=0),
+                padding_mask=output['encoder_padding_mask'].repeat_interleave(2, dim=1),
+                spk_emb=kwargs['spk_emb']
+            )
 
         output['encoder_out'] = output['encoder_out'].transpose(0,1).contiguous()
 
@@ -80,6 +89,61 @@ class MultiTargetEncoderModel(FairseqEncoderModel):
         """Set the number of parameters updates."""
         super().set_num_updates(num_updates)
         self.num_updates = num_updates
+
+
+class AutoAVSREncoder(FairseqEncoder):
+    def __init__(self, cfg):
+        super().__init__(None)
+
+        self.encoder = Encoder(
+            idim=-1,
+            attention_dim=768, # adim
+            attention_heads=12, # aheads
+            linear_units=3072, # eunits
+            num_blocks=12, #elayers
+            dropout_rate=0.1, # dropout_rate
+            positional_dropout_rate=0.1, # dropout_rate
+            attention_dropout_rate=0.1, # transformer_attn_dropout_rate
+            input_layer="conv3d", # transformer_input_layer
+            normalize_before=cfg.conformer_layer_norm_first,
+            macaron_style=True, # macaron_style
+            encoder_attn_layer_type="rel_mha", # transformer_encoder_attn_layer_type
+            use_cnn_module=True, # use_cnn_module
+            zero_triu=False, # zero_triu
+            cnn_module_kernel=31, # cnn_module_kernel
+            relu_type="swish", # relu_type
+            a_upsample_ratio=1, # a_upsample_ratio,
+        )        
+
+    def forward(self, source, padding_mask, spk_emb):
+        # padding_mask = N x 100
+        # spk_emb = N x 256
+
+        video = source['video'].squeeze(1)  # [B, T, H, W]
+        masks = ~padding_mask.unsqueeze(-2)  # [B, 1, 100]
+
+        x, masks = self.encoder(video, masks=masks)  # x = [B, T, 768]
+
+        return {
+            'encoder_out': x.transpose(0, 1),  # [T, B, C]
+            'encoder_padding_mask': padding_mask,
+            'padding_mask': padding_mask
+        }
+
+    def reorder_encoder_out(self, encoder_out, new_order):
+        if encoder_out["encoder_out"] is not None:
+            encoder_out["encoder_out"] = encoder_out[
+                "encoder_out"
+            ].index_select(1, new_order)
+        if encoder_out["encoder_padding_mask"] is not None:
+            encoder_out["encoder_padding_mask"] = encoder_out[
+                "encoder_padding_mask"
+            ].index_select(0, new_order)
+        if encoder_out["padding_mask"] is not None:
+            encoder_out["padding_mask"] = encoder_out[
+                "padding_mask"
+            ].index_select(0, new_order)
+        return encoder_out
 
 
 class Conformer(FairseqEncoder):
@@ -105,31 +169,14 @@ class Conformer(FairseqEncoder):
             relu_type="swish", # relu_type
             a_upsample_ratio=1, # a_upsample_ratio,
         )
-        # self.encoder.frontend = None
-
-        if cfg.avsr_checkpoint_path:
-            # load frontend checkpoint from Auto-AVSR
-            self.encoder.frontend = load_pretrained_frontend(self.encoder.frontend, cfg.avsr_checkpoint_path)
-            
-            # freeze frontend and check sum of params
-            sum_weights = 0
-            for name, param in self.encoder.frontend.named_parameters():
-                param.requires_grad = False
-                
-                if 'weight' in name:
-                    sum_weights += param.detach().cpu().numpy().sum()
-            
-            assert round(sum_weights, 4) == -27874.6481, sum_weights
+        self.encoder.frontend = None
 
         d = cfg.conformer_embed_dim
 
         self.final_dropout = nn.Dropout(cfg.final_dropout)
         self.num_updates = 0
 
-        if 512 != d:
-            self.proj_in = Linear(cfg.w2v_args.model.encoder_embed_dim, d)
-        else:
-            self.proj_in = None
+        self.proj_in = Linear(768, d)
 
         if tgt_dict is not None:
             # self.proj_out = Linear(d, len(tgt_dict))
@@ -161,12 +208,11 @@ class Conformer(FairseqEncoder):
 
     def forward(self, source, padding_mask, spk_emb=None, tbc=True, **kwargs):
 
-        x = source["video"]
+        x = source
 
-        x = self.encoder.frontend(x.squeeze(1))
-
-        x = x.repeat_interleave(2, dim=1)
-        padding_mask = padding_mask.repeat_interleave(2, dim=1)
+        if tbc:
+            # T x B x C -> B x T x C
+            x = x.transpose(0, 1)
 
         if self.proj_in:
             x = self.proj_in(x)
@@ -227,57 +273,3 @@ class Conformer(FairseqEncoder):
     def upgrade_state_dict_named(self, state_dict, name):
         return state_dict
     
-
-import math
-class MLP(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        mlp_dims,
-        dropout: float = 0.1,
-        nonlinearity = nn.ReLU,
-        normalization = None, #nn.BatchNorm1d,  # nn.LayerNorm,
-        special_bias: bool = False,
-        add_bn_first: bool = False,
-    ):
-        super(MLP, self).__init__()
-        projection_prev_dim = input_dim
-        projection_modulelist = []
-        last_dim = mlp_dims[-1]
-        mlp_dims = mlp_dims[:-1]
-
-        if add_bn_first:
-            if normalization is not None:
-                projection_modulelist.append(normalization(projection_prev_dim))
-            if dropout != 0:
-                projection_modulelist.append(nn.Dropout(dropout))
-
-        for idx, mlp_dim in enumerate(mlp_dims):
-            fc_layer = nn.Linear(projection_prev_dim, mlp_dim)
-            nn.init.kaiming_normal_(fc_layer.weight, a=0, mode='fan_out')
-            projection_modulelist.append(fc_layer)
-            projection_modulelist.append(nonlinearity())
-
-            if normalization is not None:
-                projection_modulelist.append(normalization(mlp_dim))
-
-            if dropout != 0:
-                projection_modulelist.append(nn.Dropout(dropout))
-            projection_prev_dim = mlp_dim
-
-        self.projection = nn.Sequential(*projection_modulelist)
-        self.last_layer = nn.Linear(projection_prev_dim, last_dim)
-        nn.init.kaiming_normal_(self.last_layer.weight, a=0, mode='fan_out')
-        if special_bias:
-            prior_prob = 0.01
-            bias_value = -math.log((1 - prior_prob) / prior_prob)
-            torch.nn.init.constant_(self.last_layer.bias, bias_value)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        input_arguments:
-            @x: torch.FloatTensor
-        """
-        x = self.projection(x)
-        x = self.last_layer(x)
-        return x

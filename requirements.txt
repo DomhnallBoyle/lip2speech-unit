@@ -98,3 +98,4 @@ flask-socketio==5.3.6
 websocket-client==1.6.3
 redis==5.0.1
 eventlet==0.33.3
+syllables==1.0.9
