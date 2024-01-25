@@ -3,8 +3,8 @@ root=$1
 type=${TYPE:-test}
 detect_landmark=${DETECT_LANDMARK:-0}
 align_mouth=${ALIGN_MOUTH:-0}
-working_dir=/home/domhnall/Repos/lip2speech-unit/avhubert/preparation
-virtual_env=/home/domhnall/Envs/avhubert/bin/activate
+working_dir=${PWD}/avhubert/preparation
+virtual_env=${HOME}/Envs/avhubert/bin/activate
 
 if [[ $detect_landmark -eq 1 ]]; then
     . $virtual_env && cd $working_dir && python detect_landmark.py --root $root --cnn_detector mmod_human_face_detector.dat --face_predictor shape_predictor_68_face_landmarks.dat --ffmpeg /usr/bin/ffmpeg --manifest $root/${type}_file.list --nshard 1 --rank 0 --landmark $root/landmark

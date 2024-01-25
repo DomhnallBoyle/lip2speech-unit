@@ -1,3 +1,4 @@
+import os
 import sys,logging
 import contextlib
 from argparse import Namespace
@@ -11,7 +12,7 @@ from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.models import FairseqEncoder, FairseqEncoderModel, register_model
 from omegaconf import MISSING
 
-from .utils import load_pretrained_frontend
+from .helpers import load_pretrained_frontend
 
 DBG=True if len(sys.argv) == 1 else False
 
@@ -37,10 +38,16 @@ class MultiTargetEncoderModelConfig(AVHubertSeq2SeqConfig):
     conformer_dropout: float = field(default=0.1)
     conformer_attention_dropout: float = field(default=0.1)
     conformer_layer_norm_first: bool = field(default=True)
+    text_supervision: bool = field(default=bool(int(os.environ.get('TEXT_SUPERVISION', 0))))
 
 @dataclass
 class MultiTargetAutoAVSREncoderModelConfig(MultiTargetEncoderModelConfig):
-    avsr_checkpoint_path: Optional[str] = field(default=MISSING)
+    avsr_checkpoint_path: Optional[str] = field(default=os.environ.get('AVSR_CHECKPOINT_PATH'))
+    encoder_attention_dim: int = field(default=int(os.environ.get('ENCODER_ATTN_DIM', 768)))  # default values taken from Auto-AVSR model config
+    encoder_attention_heads: int = field(default=int(os.environ.get('ENCODER_ATTN_HEADS', 12)))
+    encoder_linear_units: int = field(default=int(os.environ.get('ENCODER_LIN_UNITS', 3072)))
+    encoder_num_blocks: int = field(default=int(os.environ.get('ENCODER_NUM_BLOCKS', 12)))
+    # NOTE: AV-Hubert uses 1024/4096/16/24 for dims, units, heads and blocks respectively
 
 @register_model("multi_target", dataclass=MultiTargetAutoAVSREncoderModelConfig)
 class MultiTargetEncoderModel(FairseqEncoderModel):
@@ -62,7 +69,6 @@ class MultiTargetEncoderModel(FairseqEncoderModel):
             conformer = Conformer(cfg)
 
         return cls(conformer, tgt_dict, cfg)
-
 
     def forward(self, **kwargs):
         if self.cfg.use_conformer:
@@ -109,6 +115,8 @@ class Conformer(FairseqEncoder):
 
         if cfg.avsr_checkpoint_path:
             # load frontend checkpoint from Auto-AVSR
+            logger.info(f'LOADING PRETRAINED RESNET FRONTEND, {cfg.avsr_checkpoint_path}...')
+
             self.encoder.frontend = load_pretrained_frontend(self.encoder.frontend, cfg.avsr_checkpoint_path)
             
             # freeze frontend and check sum of params
@@ -281,3 +289,14 @@ class MLP(nn.Module):
         x = self.projection(x)
         x = self.last_layer(x)
         return x
+    
+
+class TextClassifier(nn.Module):
+
+    def __init__(self, input_dim, num_classes):
+        super().__init__()
+
+        self.classifier = nn.Linear(input_dim, num_classes)
+
+    def forward(self, x):
+        return self.classifier(x)

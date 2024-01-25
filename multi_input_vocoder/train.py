@@ -44,12 +44,16 @@ def train(rank, local_rank, a, h):
             world_size=h.num_gpus,
         )
 
+    h.text_supervision = bool(int(os.environ.get('TEXT_SUPERVISION', 0)))
+
     torch.cuda.manual_seed(h.seed)
     device = torch.device('cuda:{:d}'.format(local_rank))
 
     generator = MelCodeGenerator(h).to(device)
     mpd = MultiPeriodDiscriminator().to(device)
     msd = MultiScaleDiscriminator().to(device)
+
+    print(generator)
 
     if rank == 0:
         # print(generator)
@@ -94,15 +98,17 @@ def train(rank, local_rank, a, h):
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=h.lr_decay, last_epoch=last_epoch)
 
     training_filelist, validation_filelist = get_dataset_filelist(h)
-
+    
     trainset = MelCodeDataset(training_filelist, h.segment_size, h.code_hop_size, h.mel_hop_size, h.n_fft, h.num_mels, h.hop_size,
                            h.win_size, h.sampling_rate, h.fmin, h.fmax, n_cache_reuse=0, fmax_loss=h.fmax_for_loss,
                            device=device, multispkr=h.get('multispkr', None), code_dict_path=h.code_dict_path,
                            use_blur=h.get('use_blur', False), blur_kernel_size=h.get('blur_kernel_size', None), blur_sigma=h.get('blur_sigma', None),
                            use_noise=h.get('use_noise', False), noise_factor=h.get('noise_factor', None))
 
+    # shuffle=True by default here
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
 
+    # can't use sampler and have shuffle=True
     train_loader = DataLoader(trainset, num_workers=h.num_workers, shuffle=False, sampler=train_sampler,
                               batch_size=h.batch_size, pin_memory=True, drop_last=False)
 
@@ -129,11 +135,11 @@ def train(rank, local_rank, a, h):
         for i, batch in enumerate(train_loader):
             if rank == 0:
                 start_b = time.time()
-            x, y, _, y_mel = batch
+            x, y, _, y_mel = batch  # feats (mel, units, spkr), audio, filename, mel_gt
             y = torch.autograd.Variable(y.to(device, non_blocking=False))
             y_mel = torch.autograd.Variable(y_mel.to(device, non_blocking=False))
             y = y.unsqueeze(1)
-            x = {k: torch.autograd.Variable(v.to(device, non_blocking=False)) for k, v in x.items()}
+            x = {k: torch.autograd.Variable(v.to(device, non_blocking=False)) for k, v in x.items()}  # code, mel, spkr
             if train_loader.dataset.use_blur:
                 x['mel'] = train_loader.dataset.blur(x['mel'])
             if train_loader.dataset.use_noise:
@@ -142,17 +148,18 @@ def train(rank, local_rank, a, h):
 
             assert y_g_hat.shape == y.shape, f"Mismatch in vocoder output shape - {y_g_hat.shape} != {y.shape}"
 
+            # convert predicted audio to pred mel-spec
             y_g_hat_mel = mel_spectrogram(y_g_hat.squeeze(1), h.n_fft, h.num_mels, h.sampling_rate, h.hop_size,
                                           h.win_size, h.fmin, h.fmax_for_loss)
 
             optim_d.zero_grad()
 
             # MPD
-            y_df_hat_r, y_df_hat_g, _, _ = mpd(y, y_g_hat.detach())
+            y_df_hat_r, y_df_hat_g, _, _ = mpd(y, y_g_hat.detach())  # multi-period discriminator
             loss_disc_f, losses_disc_f_r, losses_disc_f_g = discriminator_loss(y_df_hat_r, y_df_hat_g)
 
             # MSD
-            y_ds_hat_r, y_ds_hat_g, _, _ = msd(y, y_g_hat.detach())
+            y_ds_hat_r, y_ds_hat_g, _, _ = msd(y, y_g_hat.detach())  # multi-scale discriminator
             loss_disc_s, losses_disc_s_r, losses_disc_s_g = discriminator_loss(y_ds_hat_r, y_ds_hat_g)
 
             loss_disc_all = loss_disc_s + loss_disc_f
@@ -183,11 +190,10 @@ def train(rank, local_rank, a, h):
                     with torch.no_grad():
                         mel_error = F.l1_loss(y_mel, y_g_hat_mel).item()
 
-                    print(
-                        'Steps : {:d}, Gen Loss Total : {:4.3f}, Mel-Spec. Error : {:4.3f}, s/b : {:4.3f}'.format(steps,
-                                                                                                                  loss_gen_all,
-                                                                                                                  mel_error,
-                                                                                                                  time.time() - start_b))
+                    print(f'Steps: {steps:d}, ' \
+                          f'Gen Loss Total: {loss_gen_all:4.3f}, ' \
+                          f'Mel-Spec. Error: {mel_error:4.3f}, ' \
+                          f'Secs per batch: {time.time() - start_b:4.3f}')
 
                 # checkpointing
                 if steps % a.checkpoint_interval == 0 and steps != 0:
@@ -219,8 +225,8 @@ def train(rank, local_rank, a, h):
                                                           h.hop_size, h.win_size, h.fmin, h.fmax_for_loss)
                             val_err_tot += F.l1_loss(y_mel, y_g_hat_mel).item()
 
-                            if j <= 4:
-                                if steps == 0:
+                            if j <= 4:  # first 4 batches
+                                if steps == 0:  # only add gt audio and mel-spec to logs at beginning of training
                                     sw.add_audio('gt/y_{}'.format(j), y[0], steps, h.sampling_rate)
                                     sw.add_figure('gt/y_spec_{}'.format(j), plot_spectrogram(y_mel[0].cpu()), steps)
 
@@ -253,9 +259,10 @@ def main():
 
     parser = argparse.ArgumentParser()
 
+    parser.add_argument('config')
+    parser.add_argument('dataset_label_directory')
     parser.add_argument('--group_name', default=None)
     parser.add_argument('--checkpoint_path', default='cp_hifigan')
-    parser.add_argument('--config', default='')
     parser.add_argument('--training_epochs', default=2000, type=int)
     parser.add_argument('--training_steps', default=400000, type=int)
     parser.add_argument('--stdout_interval', default=5, type=int)
@@ -274,6 +281,13 @@ def main():
 
     json_config = json.loads(data)
     h = AttrDict(json_config)
+
+    # point to dataset directory
+    dataset_label_directory = Path(a.dataset_label_directory)
+    h.code_dict_path = str(dataset_label_directory.joinpath('dict.unt.txt'))
+    h.input_training_file = str(dataset_label_directory.joinpath('train.tsv'))
+    h.input_validation_file = str(dataset_label_directory.joinpath('val.tsv'))
+
     build_env(a.config, 'config.json', a.checkpoint_path)
 
     torch.manual_seed(h.seed)

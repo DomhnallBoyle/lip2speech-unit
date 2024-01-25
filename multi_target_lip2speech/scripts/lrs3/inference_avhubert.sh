@@ -4,7 +4,7 @@ checkpoint_path=${3:-`pwd`/checkpoints/lip2speech_lrs3_avhubert_multi.pt}
 cuda=${CUDA_VISIBLE_DEVICES:-0}
 
 CUDA_VISIBLE_DEVICES=$cuda \
-PYTHONPATH=/home/domhnall/Repos/lip2speech-unit/fairseq \
+PYTHONPATH=${HOME}/Repos/lip2speech-unit/fairseq \
 python -B inference.py \
 --config-dir conf \
 --config-name decode \

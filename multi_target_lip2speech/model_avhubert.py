@@ -19,7 +19,8 @@ else:
     sys.path.insert(0, Path(__file__).resolve().parent.parent)
     from espnet.nets.pytorch_backend.transformer.encoder import Encoder
     sys.path.pop(0)
-    from .model import MultiTargetEncoderModelConfig, MLP
+    from .model import MultiTargetEncoderModelConfig, MLP, TextClassifier
+    from .helpers import SentenceProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -31,20 +32,21 @@ class MultiTargetAVHubertEncoderModel(FairseqEncoderModel):
         self.cfg = cfg
         self.freeze_finetune_updates = cfg.freeze_finetune_updates
         self.completed_first_forward = False
-        self.init()
 
-    def init(self):
+        self.load_checkpoint()
+
+    def load_checkpoint(self):
         checkpoint_path = self.cfg.checkpoint_path if self.cfg.checkpoint_path else None
         if checkpoint_path:
             state = torch.load(checkpoint_path, map_location='cpu')
             self.load_state_dict(state['model'])
-            print('PRETRAINED MODEL LOADED')
+            logger.info('PRETRAINED MODEL LOADED')
         self.cfg.checkpoint_path = checkpoint_path
 
     @classmethod
     def build_model(cls, cfg, task):
         """Build a new model instance."""
-        print('BUILDING MODEL')
+        logger.info('BUILDING MODEL')
 
         arg_overrides = {
             "dropout": cfg.dropout,
@@ -142,7 +144,7 @@ class MultiTargetAVHubertEncoderModel(FairseqEncoderModel):
 
         if self.cfg.use_conformer:
             output = self.conformer(
-                source=output['encoder_out'].repeat_interleave(2, dim=0),
+                source=output['encoder_out'].repeat_interleave(2, dim=0),  # repeat_interleave = repeat every frame (row) consecutively (interleave), double no. of rows in this case
                 padding_mask=output['encoder_padding_mask'].repeat_interleave(2, dim=1),
                 spk_emb=kwargs['spk_emb']
             )
@@ -204,6 +206,9 @@ class Conformer(FairseqEncoder):
         self.encoder.frontend = None  # using frontend from AV-HUBERT, set this to None
 
         d = cfg.conformer_embed_dim
+
+        self.sentence_processor = SentenceProcessor() if cfg.text_supervision else None
+        self.text_classifier = TextClassifier(input_dim=d, num_classes=self.sentence_processor.num_classes) if cfg.text_supervision else None
 
         self.final_dropout = nn.Dropout(cfg.final_dropout)
         self.num_updates = 0
@@ -277,14 +282,19 @@ class Conformer(FairseqEncoder):
         x = self.final_dropout(x)
 
         if self.proj_out:
-            x = self.proj_out(x)
+            unit_proj = self.proj_out(x)
 
-        return {
-            "encoder_out": x,  # T x B x C
+        out = {
+            "encoder_out": unit_proj,  # T x B x C
             "encoder_padding_mask": padding_mask,  # B x T
             "padding_mask": padding_mask,
             "encoder_out_mel": encoder_out_mel,
         }
+
+        if self.text_classifier:
+            out['encoder_char'] = self.text_classifier(x)
+
+        return out
 
     def reorder_encoder_out(self, encoder_out, new_order):
         if encoder_out["encoder_out"] is not None:

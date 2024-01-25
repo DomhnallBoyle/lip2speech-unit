@@ -120,6 +120,17 @@ class MultiTargetSequenceGenerator(SequenceGenerator):
             mels = [mel[:target_length*2] for mel, target_length in zip(mels, sample['target_lengths'])]
             sample['mels'] = mels
 
+        if encoder_outs[0]['encoder_char'] is not None:
+            encoder_char = encoder_outs[0]['encoder_char'].cpu()  # output = T, 1, C (1 sample in batch)
+            encoder_char_softmax = torch.nn.functional.softmax(encoder_char, dim=2)[:, 0, :]  # output = T, C
+            
+            # argmax is naive inference
+            pred_text_labels = torch.argmax(encoder_char_softmax, dim=1)  # output = T
+
+            # TODO: replace repeating tokens with blanks?
+            # see inference section in this link: https://distill.pub/2017/ctc/
+            sample['pred_text_labels'] = pred_text_labels.numpy().tolist()
+
         # placeholder of indices for bsz * beam_size to hold tokens and accumulative scores
         new_order = torch.arange(bsz).view(-1, 1).repeat(1, beam_size).view(-1)
         new_order = new_order.to(src_device).long()
@@ -453,4 +464,5 @@ class MultiTargetSequenceGenerator(SequenceGenerator):
             finalized[sent] = torch.jit.annotate(
                 List[Dict[str, Tensor]], finalized[sent]
             )
+        
         return finalized, sample

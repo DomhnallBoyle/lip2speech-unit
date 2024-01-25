@@ -105,8 +105,11 @@ def init_worker(queue, arguments):
         config_file = os.path.join(os.path.split(a.checkpoint_file)[0], 'config.json')
     with open(config_file) as f:
         data = f.read()
+
     json_config = json.loads(data)
     h = AttrDict(json_config)
+    h.code_dict_path = a.code_dict_path
+    h.text_supervision = bool(int(os.environ.get('TEXT_SUPERVISION', 0)))
 
     generator = MelCodeGenerator(h).to(device)
     if os.path.isdir(a.checkpoint_file):
@@ -165,14 +168,15 @@ def main():
     print('Initializing Inference Process..')
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('config_file')
+    parser.add_argument('input_code_file')
+    parser.add_argument('code_dict_path')
     parser.add_argument('--code_file', default=None)
-    parser.add_argument('--input_code_file', default='./datasets/LJSpeech/cpc100/test.txt')
     parser.add_argument('--output_dir', default='generated_files')
     parser.add_argument('--checkpoint_file', required=True)
     parser.add_argument('--pad', default=None, type=int)
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('-n', type=int, default=10)
-    parser.add_argument('--config_file')
     a = parser.parse_args()
 
     seed = 52
@@ -194,8 +198,10 @@ def main():
         config_file = os.path.join(os.path.split(a.checkpoint_file)[0], 'config.json')
     with open(config_file) as f:
         data = f.read()
+
     json_config = json.loads(data)
     h = AttrDict(json_config)
+    h.code_dict_path = a.code_dict_path
 
     if os.path.isdir(a.checkpoint_file):
         cp_g = scan_checkpoint(a.checkpoint_file, 'g_')

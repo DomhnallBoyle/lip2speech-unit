@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any, List, Optional, Union
 
 import numpy as np
@@ -26,6 +27,7 @@ if DBG:
 else:
     from . import utils_aug as custom_utils
     from avhubert.hubert_dataset import load_audio_visual, load_label, load_label_offset, verify_label_lengths, AVHubertDataset
+    from .helpers import SentenceProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ class MultiTargetDataset(AVHubertDataset):
     def __init__(
             self,
             manifest_path: str,
+            gt_path: str,
             sample_rate: float,
             label_paths: List[str],
             label_rates: Union[List[float], float],  # -1 for sequence labels
@@ -63,14 +66,29 @@ class MultiTargetDataset(AVHubertDataset):
             noise_num=1,
             time_mask: bool = False,
             random_erase: bool = False,
+            text_supervision: bool = False
     ):
+        # load gt if available
+        self.gt_path = gt_path
+        self.text_supervision = text_supervision and Path(gt_path).exists()
+        self.sentence_processor = SentenceProcessor() if self.text_supervision else None
+        self.gt_d = self.load_gt_data(gt_path=gt_path) if self.text_supervision else None
+
         self.label_rates = (
             [label_rates for _ in range(len(label_paths))]
             if isinstance(label_rates, int)
             else label_rates
         )
         self.modalities = set(modalities)
-        self.audio_root, self.names, inds, tot, self.sizes = load_audio_visual(manifest_path, max_keep_sample_size, min_keep_sample_size, frame_rate=sample_rate, label_paths=label_paths, label_rates=self.label_rates)
+        self.audio_root, self.names, inds, tot, self.sizes = load_audio_visual(
+            manifest_path, 
+            max_keep_sample_size, 
+            min_keep_sample_size, 
+            frame_rate=sample_rate, 
+            label_paths=label_paths, 
+            label_rates=self.label_rates,
+            gt_d=self.gt_d
+        )
         self.sample_rate = sample_rate
         self.stack_order_audio = stack_order_audio
         self.shuffle = shuffle
@@ -131,6 +149,26 @@ class MultiTargetDataset(AVHubertDataset):
             f"Noise wav: {noise_fn}->{len(self.noise_wav)} wav, Prob: {self.noise_prob}, SNR: {self.noise_snr}, Number of mixture: {self.noise_num}"
         )
 
+    def load_gt_data(self, gt_path):
+        from helpers import load_groundtruth_data
+        
+        gt_df = load_groundtruth_data(gt_path, skip_lines=True)[0]
+        
+        return {
+            row['Video Name']: row['Phrase'] for _, row in gt_df.iterrows() 
+            if self.sentence_processor.is_valid(row['Phrase'])
+        }
+    
+    def load_text_labels(self, video_path):
+        _id = Path(video_path).stem
+        try:
+            text = self.gt_d[_id]
+        except KeyError as e:
+            logger.info(f'ID not found: {self.gt_path}, {_id}')
+            raise e
+
+        return self.sentence_processor.encode(text)
+
     def load_additional_feature(self, mix_name):
         video_fn, audio_fn = mix_name
 
@@ -149,7 +187,7 @@ class MultiTargetDataset(AVHubertDataset):
         return mel, spk_emb
 
     def __getitem__(self, index):
-        sample = super().__getitem__(index)
+        sample = super().__getitem__(index)  # speech units loaded in base class
         mel, spk_emb = self.load_additional_feature(self.names[index])
 
         mel = torch.from_numpy(mel.astype(np.float32))
@@ -158,6 +196,10 @@ class MultiTargetDataset(AVHubertDataset):
         sample["mel"] = mel
         sample["spk_emb"] = spk_emb
         sample['names'] = self.names[index]
+
+        if self.text_supervision:
+            text_labels = self.load_text_labels(video_path=self.names[index][0])
+            sample['text_labels'] = torch.from_numpy(text_labels.astype(np.int))
 
         return sample
 
@@ -168,5 +210,12 @@ class MultiTargetDataset(AVHubertDataset):
         batch["mel"] = torch.stack([torch.nn.functional.pad(s["mel"], [0, 0, 0, max_mel_len - len(s["mel"])]) for s in samples])
 
         batch["net_input"]["spk_emb"] = torch.stack([s["spk_emb"] for s in samples])
+
+        if self.text_supervision:
+            # 'text_labels' are 1-dimensional, no need for padding
+            batch['text_labels'] = torch.from_numpy(np.concatenate([s['text_labels'] for s in samples])).int()
+            batch['text_labels_lengths'] = torch.Tensor([s['text_labels'].shape[0] for s in samples]).int()
+
+            assert batch['text_labels'].shape[0] == batch['text_labels_lengths'].sum()
 
         return batch

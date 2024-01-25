@@ -40,11 +40,14 @@ class Lip2SpeechConfig(AVHubertPretrainingConfig):
     time_mask: bool = field(default=False)
     random_erase: bool = field(default=False)
     fp16: bool = field(default=False)
+    text_supervision: bool = field(default=bool(int(os.environ.get('TEXT_SUPERVISION', 0))))
+
 
 @register_task("lip2speech", dataclass=Lip2SpeechConfig)
 class Lip2SpeechTask(AVHubertPretrainingTask):
     def load_dataset(self, split: str, **kwargs) -> None:
         manifest = f"{self.cfg.data}/{split}.tsv"
+        gt_path = f'{self.cfg.data}/{split}.csv'
         dictionaries = [self.target_dictionary] if self.fine_tuning else self.dictionaries
         pad_list = [dictionary.pad() for dictionary in dictionaries]
         eos_list = [dictionary.eos() for dictionary in dictionaries]
@@ -64,6 +67,7 @@ class Lip2SpeechTask(AVHubertPretrainingTask):
 
         self.datasets[split] = MultiTargetDataset(
             manifest,
+            gt_path,
             sample_rate=self.cfg.sample_rate,
             label_paths=paths,
             label_rates=self.cfg.label_rate,
@@ -92,6 +96,7 @@ class Lip2SpeechTask(AVHubertPretrainingTask):
             noise_num=noise_num,
             time_mask=self.cfg.time_mask,
             random_erase=self.cfg.random_erase,
+            text_supervision=self.cfg.text_supervision
         )
 
     def build_generator(

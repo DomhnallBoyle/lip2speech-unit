@@ -7,7 +7,7 @@ warmup_updates=${WARMUP_UPDATES:-10000}
 
 # freeze_finetune_updates == max_updates ensures AV-Hubert pretrained visual frontend is frozen
 
-PYTHONPATH=/home/domhnall/Repos/lip2speech-unit/fairseq \
+PYTHONPATH=${HOME}/Repos/lip2speech-unit/fairseq \
 fairseq-hydra-train \
 --config-dir conf/lrs3 \
 --config-name multi_target_avhubert \

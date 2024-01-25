@@ -11,8 +11,6 @@ from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.models import FairseqEncoder, FairseqEncoderModel, register_model
 from omegaconf import MISSING
 
-from .utils import load_pretrained_frontend
-
 DBG=True if len(sys.argv) == 1 else False
 
 if DBG:
@@ -38,6 +36,9 @@ class MultiTargetAutoAVSREncoderModel(FairseqEncoderModel):
 
     def init(self):
         # load auto-avsr model, only the encoder part i.e. ResNet + Conformer
+        if not self.cfg.avsr_checkpoint_path:
+            return
+        
         auto_avsr_state = torch.load(self.cfg.avsr_checkpoint_path, map_location='cpu')
         auto_avsr_keys = list(auto_avsr_state.keys())
         for k in auto_avsr_keys:
@@ -97,10 +98,10 @@ class AutoAVSREncoder(FairseqEncoder):
 
         self.encoder = Encoder(
             idim=-1,
-            attention_dim=768, # adim
-            attention_heads=12, # aheads
-            linear_units=3072, # eunits
-            num_blocks=12, #elayers
+            attention_dim=cfg.encoder_attention_dim, # adim
+            attention_heads=cfg.encoder_attention_heads, # aheads
+            linear_units=cfg.encoder_linear_units, # eunits
+            num_blocks=cfg.encoder_num_blocks, #elayers
             dropout_rate=0.1, # dropout_rate
             positional_dropout_rate=0.1, # dropout_rate
             attention_dropout_rate=0.1, # transformer_attn_dropout_rate
@@ -176,7 +177,7 @@ class Conformer(FairseqEncoder):
         self.final_dropout = nn.Dropout(cfg.final_dropout)
         self.num_updates = 0
 
-        self.proj_in = Linear(768, d)
+        self.proj_in = Linear(cfg.encoder_attention_dim, d)
 
         if tgt_dict is not None:
             # self.proj_out = Linear(d, len(tgt_dict))
@@ -214,8 +215,7 @@ class Conformer(FairseqEncoder):
             # T x B x C -> B x T x C
             x = x.transpose(0, 1)
 
-        if self.proj_in:
-            x = self.proj_in(x)
+        x = self.proj_in(x)
 
         x, masks = self.encoder.forward_after_frontend(
             x,
@@ -272,4 +272,3 @@ class Conformer(FairseqEncoder):
 
     def upgrade_state_dict_named(self, state_dict, name):
         return state_dict
-    

@@ -89,7 +89,7 @@ tzdata==2023.3
 Unidecode==1.3.6
 urllib3==1.26.16
 Werkzeug==2.3.7
-whisper==1.0
+git+https://github.com/openai/whisper.git@eff383b#egg=whisper
 gunicorn==21.2.0
 jiwer==3.0.3
 tensorboard==2.14.0
@@ -99,3 +99,6 @@ websocket-client==1.6.3
 redis==5.0.1
 eventlet==0.33.3
 syllables==1.0.9
+sentencepiece==0.1.99
+h5py==3.10.0
+pytube==15.0.0

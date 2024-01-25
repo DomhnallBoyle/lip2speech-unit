@@ -36,7 +36,7 @@ else:
 logger = logging.getLogger(__name__)
 
 
-def load_audio_visual(manifest_path, max_keep, min_keep, frame_rate, label_paths, label_rates, tol=0.1):
+def load_audio_visual(manifest_path, max_keep, min_keep, frame_rate, label_paths, label_rates, tol=0.1, gt_d=None):
     def is_audio_label_aligned(audio_dur, label_durs):
         """
         is_aligned = []
@@ -79,6 +79,10 @@ def load_audio_visual(manifest_path, max_keep, min_keep, frame_rate, label_paths
                 video_path = items[1]
                 audio_path = items[2]
                 audio_id = items[0]
+
+                if gt_d and audio_id.split('/')[1] not in gt_d:
+                    continue
+
                 names.append((video_path, audio_path+':'+audio_id))
                 inds.append(ind)
                 sizes.append(sz)
@@ -441,6 +445,9 @@ class AVHubertDataset(FairseqDataset):
             batch["target_lengths_list"] = lengths_list
             batch["ntokens_list"] = ntokens_list
             batch["target_list"] = targets_list
+        
+        batch['input_lengths'] = torch.Tensor([x.shape[0] for x in video_source]).int()
+
         return batch
 
     def collater_audio(self, audios, audio_size, audio_starts=None):

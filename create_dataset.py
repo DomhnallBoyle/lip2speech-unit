@@ -27,8 +27,9 @@ from helpers import alter_video_speed, calculate_ros, convert_fps, crop_video, e
 stft = None
 cache = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT)
 
-# TODO: fake audio, mel-spec and speech units for testing etc - only needs mouth frames and speaker embedding
-
+# TODO: 
+# fake audio, mel-spec and speech units for testing etc - only needs mouth frames and speaker embedding
+# create groundtruth csv files using WhisperASR from cropped videos
 
 def trim_video_to_duration(video_path, cropped_video_path='/tmp/video_cropped.mp4'):
     # fix duration issue where ffprobe duration doesn't match no. frames and fps
@@ -111,6 +112,17 @@ def init_process(process_index, args, sample_paths):
                     video_path=video_path, 
                     speaker_id_index=args.speaker_id_index, 
                 )
+            elif args.se_duration:
+                video_duration = get_video_duration(video_path=video_path)
+                start_time = np.random.uniform(0, video_duration - args.se_duration)  # includes low, exludes high
+                end_time = start_time + args.se_duration
+                crop_video(
+                    video_path=video_path, 
+                    crop_start_time=start_time, 
+                    crop_end_time=end_time, 
+                    output_video_path=cropped_video_path
+                )
+                speaker_embedding_video_path = cropped_video_path
             else:
                 speaker_embedding_video_path = video_path
 
@@ -354,14 +366,26 @@ def vocoder(args):
     assert synthesis_directory.exists()
 
     output_directory = synthesis_directory.joinpath('vocoder')
-    if output_directory.exists():
+    if output_directory.exists() and args.redo:
         shutil.rmtree(output_directory)
-    output_directory.mkdir()
+    output_directory.mkdir(exist_ok=True)
 
-    shutil.copytree(dataset_directory.joinpath('audio'), output_directory.joinpath('audio'))
-    shutil.copytree(dataset_directory.joinpath('label'), output_directory.joinpath('label'))
-    shutil.copytree(dataset_directory.joinpath('spk_emb'), output_directory.joinpath('spk_emb'))
-    shutil.copytree(synthesis_directory.joinpath('pred_mel'), output_directory.joinpath('mel'))
+    # TODO: create symlinks rather than copying files
+    for source_d, dest_d in zip([
+            dataset_directory.joinpath(f'audio/{args.type}'),
+            dataset_directory.joinpath('label'),
+            dataset_directory.joinpath(f'spk_emb/{args.type}'),
+            synthesis_directory.joinpath(f'pred_mel/{args.type}')
+        ], [
+            output_directory.joinpath(f'audio/{args.type}'),
+            output_directory.joinpath('label'),
+            output_directory.joinpath(f'spk_emb/{args.type}'),
+            output_directory.joinpath(f'mel/{args.type}')
+        ]):
+        if dest_d.exists():
+            continue
+        print(f'Copying {source_d} to {dest_d}...')
+        shutil.copytree(source_d, dest_d)
 
     manifest_path = output_directory.joinpath(f'label/{args.type}.tsv')
     unt_path = output_directory.joinpath(f'label/{args.type}.unt')
@@ -369,6 +393,8 @@ def vocoder(args):
     with manifest_path.open('r') as f:
         manifest = f.read().splitlines()
         manifest[0] = str(output_directory.resolve())
+
+    text_labels_f = output_directory.joinpath(f'label/{args.type}.txt').open('w') if args.text_labels else None
 
     with manifest_path.open('w') as f1, unt_path.open('w') as f2:
         f1.write(f'{manifest[0]}\n')
@@ -383,6 +409,18 @@ def vocoder(args):
 
             f1.write(f'{line}\n')
             f2.write(f'{speech_units}\n')
+
+            # combine text labels if applicable
+            if text_labels_f:
+                pred_t_labels_path = synthesis_directory.joinpath(f'pred_text/{_id}.txt')
+                if not pred_t_labels_path.exists():
+                    raise Exception(f'Missing text labels for {_id}...')
+                with pred_t_labels_path.open('r') as f4:
+                    t_labels = f4.read().splitlines()[0]
+                text_labels_f.write(f'{t_labels}\n')
+
+    if text_labels_f:
+        text_labels_f.close()
 
 
 def combine(args):
@@ -500,6 +538,7 @@ if __name__ == '__main__':
     parser_1a.add_argument('--replace_paths', type=lambda s: json.loads(s))
     parser_1a.add_argument('--use_unique_parent_name', action='store_true')
     parser_1a.add_argument('--use_se_content_mapping', action='store_true')
+    parser_1a.add_argument('--se_duration', type=float)  # randomly crop video to this duration for se
     parser_1a.add_argument('--speaker_id_index', type=int, default=-2)
     parser_1a.add_argument('--speaker_embedding_path')
     parser_1a.add_argument('--speaker_embedding_audio_path')
@@ -516,6 +555,8 @@ if __name__ == '__main__':
 
     parser_1d = sub_parser_1.add_parser('vocoder')
     parser_1d.add_argument('synthesis_directory')
+    parser_1d.add_argument('--text_labels', action='store_true')
+    parser_1d.add_argument('--redo', action='store_true')
 
     parser_2 = sub_parser.add_parser('combine')
     parser_2.add_argument('directories', type=lambda s: s.split(','))
