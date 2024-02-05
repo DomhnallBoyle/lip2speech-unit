@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, List, Optional, Union
 
 import numpy as np
-
 import torch
 import torch.nn.functional as F
 from python_speech_features import logfbank
@@ -66,13 +65,15 @@ class MultiTargetDataset(AVHubertDataset):
             noise_num=1,
             time_mask: bool = False,
             random_erase: bool = False,
-            text_supervision: bool = False
+            text_supervision: bool = False,
+            auto_avsr: bool = False
     ):
         # load gt if available
         self.gt_path = gt_path
         self.text_supervision = text_supervision and Path(gt_path).exists()
         self.sentence_processor = SentenceProcessor() if self.text_supervision else None
         self.gt_d = self.load_gt_data(gt_path=gt_path) if self.text_supervision else None
+        self.auto_avsr = auto_avsr
 
         self.label_rates = (
             [label_rates for _ in range(len(label_paths))]
@@ -127,18 +128,41 @@ class MultiTargetDataset(AVHubertDataset):
         self.pad_audio = pad_audio
         self.normalize = normalize
         if image_aug:
-            self.transform = custom_utils.Compose([
-                custom_utils.Normalize( 0.0,255.0 ),
-                custom_utils.RandomCrop((image_crop_size, image_crop_size)),
-                custom_utils.HorizontalFlip(0.5),
-                custom_utils.Normalize(image_mean, image_std) ]
-                + ([custom_utils.RandomErase(0.5)] if random_erase else [])
-                + ([custom_utils.TimeMask()] if time_mask else []) )
+            if self.auto_avsr:
+                transforms = [
+                    custom_utils.Normalize(0.0, 255.0),
+                    custom_utils.RandomCrop((image_crop_size, image_crop_size)),
+                    custom_utils.Grayscale(),
+                    custom_utils.HorizontalFlip(0.5),
+                    custom_utils.Normalize(image_mean, image_std) 
+                ]
+            else:
+                transforms = [
+                    custom_utils.Normalize(0.0, 255.0),
+                    custom_utils.RandomCrop((image_crop_size, image_crop_size)),
+                    custom_utils.HorizontalFlip(0.5),  # flip around y-axis
+                    custom_utils.Normalize(image_mean, image_std) 
+                ]
+
+            transforms += [custom_utils.RandomErase(0.5)] if random_erase else []
+            transforms += [custom_utils.TimeMask()] if time_mask else []
+            self.transform = custom_utils.Compose(transforms)
         else:
-            self.transform = custom_utils.Compose([
-                custom_utils.Normalize( 0.0,255.0 ),
-                custom_utils.CenterCrop((image_crop_size, image_crop_size)),
-                custom_utils.Normalize(image_mean, image_std) ])
+            if self.auto_avsr:
+                transforms = [
+                    custom_utils.Normalize(0.0, 255.0),
+                    custom_utils.CenterCrop((image_crop_size, image_crop_size)),
+                    custom_utils.Grayscale(),
+                    custom_utils.Normalize(image_mean, image_std)
+                ]
+            else:
+                transforms = [
+                    custom_utils.Normalize(0.0, 255.0),
+                    custom_utils.CenterCrop((image_crop_size, image_crop_size)),
+                    custom_utils.Normalize(image_mean, image_std)
+                ]
+            self.transform = custom_utils.Compose(transforms)
+
         logger.info(f"image transform: {self.transform}")
 
         logger.info(
@@ -185,6 +209,17 @@ class MultiTargetDataset(AVHubertDataset):
             raise FileNotFoundError(f"{spk_emb_fn} does not exist")
 
         return mel, spk_emb
+
+    def load_video(self, audio_name):
+        if not self.auto_avsr:
+            return super().load_video(audio_name)
+
+        # read video in colour (BGR), convert to grayscale later
+        feats = custom_utils.load_video(os.path.join(self.audio_root, audio_name), grayscale=False)
+        feats = self.transform(feats)
+        feats = np.expand_dims(feats, axis=-1)
+        
+        return feats
 
     def __getitem__(self, index):
         sample = super().__getitem__(index)  # speech units loaded in base class

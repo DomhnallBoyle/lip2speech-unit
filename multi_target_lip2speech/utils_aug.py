@@ -3,14 +3,17 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
+import math
 
 import cv2
 import torch
 import random
 import numpy as np
+import torchvision
 from typing import Dict, List, Optional, Tuple
 
-def load_video(path):
+
+def load_video(path, grayscale=True):
     for i in range(3):
         try:
             cap = cv2.VideoCapture(path)
@@ -18,7 +21,8 @@ def load_video(path):
             while True:
                 ret, frame = cap.read()
                 if ret:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    if grayscale:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     frames.append(frame)
                 else:
                     break
@@ -53,6 +57,18 @@ class Compose(object):
         return format_string
 
 
+class Grayscale:
+
+    def __init__(self):
+        self.transform = torchvision.transforms.Grayscale()
+
+    def __call__(self, frames):
+        frames = torch.from_numpy(frames).permute(0, 3, 1, 2)  # transform requires [T, C, H, W]
+        frames = self.transform(frames)  # output = [T, 1, H, W]
+
+        return frames.squeeze(1).numpy()  # remove single dim
+
+
 class Normalize(object):
     """Normalize a ndarray image with mean and standard deviation.
     """
@@ -74,6 +90,7 @@ class Normalize(object):
     def __repr__(self):
         return self.__class__.__name__+'(mean={0}, std={1})'.format(self.mean, self.std)
 
+
 class CenterCrop(object):
     """Crop the given image at the center
     """
@@ -87,7 +104,7 @@ class CenterCrop(object):
         Returns:
             numpy.ndarray: Cropped image.
         """
-        t, h, w = frames.shape
+        t, h, w = frames.shape[:3]
         th, tw = self.size
         delta_w = int(round((w - tw))/2.)
         delta_h = int(round((h - th))/2.)
@@ -109,7 +126,7 @@ class RandomCrop(object):
         Returns:
             numpy.ndarray: Cropped image.
         """
-        t, h, w = frames.shape
+        t, h, w = frames.shape[:3]
         th, tw = self.size
         delta_w = random.randint(0, w-tw)
         delta_h = random.randint(0, h-th)
@@ -118,6 +135,7 @@ class RandomCrop(object):
 
     def __repr__(self):
         return self.__class__.__name__ + '(size={0})'.format(self.size)
+
 
 class HorizontalFlip(object):
     """Flip image horizontally.
@@ -139,7 +157,7 @@ class HorizontalFlip(object):
                 frames[index] = cv2.flip(frames[index], 1)
         return frames
 
-import math
+
 class RandomErase(object):
     def __init__(self, p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), replace_with_zero=True):
         self.p = p
@@ -173,6 +191,7 @@ class RandomErase(object):
 
         return frames
 
+
 class TimeMask(object):
     """time mask
     """
@@ -200,6 +219,7 @@ class TimeMask(object):
                 cloned[i*self.hop_frame+mask_start : i*self.hop_frame+mask_start+mask_len] = cloned.mean()
 
         return cloned
+
 
 def compute_mask_indices(
     shape: Tuple[int, int],
@@ -330,6 +350,7 @@ def compute_mask_indices(
         ends.append(start_indices+lengths)
         batch_indexes.append(np.zeros([len(start_indices)])+i)
     return mask, np.concatenate(starts).astype(np.int64), np.concatenate(ends).astype(np.int64), np.concatenate(batch_indexes).astype(np.int64)
+
 
 def find_runs(x):
     """Find runs of consecutive items in an array."""

@@ -80,11 +80,11 @@ def setup(args, args_path):
         with open(args_path, 'r') as f:
             args = SimpleNamespace(**json.load(f))
 
-    for k in ['default_audios', 'default_audio', 'web_client_run_asr', 'web_client_streaming', 'prod']:
+    for k in ['default_audios', 'default_audio_id', 'web_client_run_asr', 'web_client_streaming', 'prod']:
         assert k in args.__dict__, f'"{k}" not in args'
 
     assert len(args.default_audios) > 0, 'Default audios required'
-    assert args.default_audio in args.default_audios, f'Default audio "{args.default_audio}" does not exist in mapping'
+    assert any([args.default_audio_id == d['id'] for d in args.default_audios]), f'Default audio "{args.default_audio_id}" does not exist in mapping'
 
     # setup static and server directories
     for d in [config.INPUTS_PATH, config.STATIC_PATH]:
@@ -99,26 +99,23 @@ def create_app(args=None, args_path=None):
     args = setup(args, args_path)
 
     # move any audio files to static and pre-load speaker embeddings for them
-    default_audio_id = None
+    default_audio_id = args.default_audio_id
     speaker_embedding_lookup = {}
     default_audios_list = []
-    for audio_name, audio_path in args.default_audios.items():
+    for audio_d in args.default_audios:
+        audio_id, audio_name, audio_path = audio_d['id'], audio_d['name'], audio_d['path']
+
         audio_path = Path(audio_path)
         assert audio_path.exists(), f'{audio_path} does not exist'
 
-        audio_id = str(uuid.uuid4())
         static_audio_path = config.STATIC_PATH.joinpath(f'{audio_id}.wav')
-        shutil.copyfile(audio_path, static_audio_path)
+        shutil.copyfile(audio_path, static_audio_path)  # will replace if destination exists
 
         try:
             speaker_embedding_lookup[audio_id] = _get_speaker_embedding(audio_path=str(static_audio_path))
         except requests.exceptions.ConnectionError:
             logging.warning('Speaker embedding server is down...')
         
-        # set the default audio id if no audio input supplied
-        if args.default_audio == audio_name:
-            default_audio_id = audio_id
-
         default_audios_list.append({
             'id': audio_id,
             'name': audio_name
@@ -210,7 +207,9 @@ def create_app(args=None, args_path=None):
                 return {'message': 'Speaker embedding server not available'}, HTTPStatus.INTERNAL_SERVER_ERROR
         else:
             logging.info(f'Using speaker embedding from lookup - {audio_id}...')
-            speaker_embedding = speaker_embedding_lookup[audio_id]  # use default or supplied audio id
+            speaker_embedding = speaker_embedding_lookup.get(audio_id)  # use default or supplied audio id
+            if speaker_embedding is None:
+                return {'message': f'Default audio id {audio_id} does not exist'}, HTTPStatus.BAD_REQUEST
         np.save(config.SPK_EMB_DIRECTORY.joinpath(f'{uid}.npy'), speaker_embedding)
 
         # create file.list for extracting mouth frames

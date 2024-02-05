@@ -172,7 +172,7 @@ class LabelSmoothedCrossEntropyCriterionLengthMatch(LabelSmoothedCrossEntropyCri
                 "mel_loss", ctc_loss_sum / sample_size, sample_size, round=5
             )
 
-        if logging_outputs[0]['ctc_loss'] is not None:
+        if 'ctc_loss' in logging_outputs[0]:
             ctc_loss_sum = sum(log.get('ctc_loss', 0) for log in logging_outputs)
             metrics.log_scalar(
                 'ctc_loss', ctc_loss_sum / sample_size, sample_size, round=5

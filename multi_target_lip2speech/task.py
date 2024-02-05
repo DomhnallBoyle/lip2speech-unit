@@ -41,6 +41,8 @@ class Lip2SpeechConfig(AVHubertPretrainingConfig):
     random_erase: bool = field(default=False)
     fp16: bool = field(default=False)
     text_supervision: bool = field(default=bool(int(os.environ.get('TEXT_SUPERVISION', 0))))
+    auto_avsr: bool = field(default=bool(int(os.environ.get('AUTO_AVSR', 0))))
+    skip_aug: bool = field(default=bool(int(os.environ.get('SKIP_AUG', 0))))
 
 
 @register_task("lip2speech", dataclass=Lip2SpeechConfig)
@@ -62,6 +64,8 @@ class Lip2SpeechTask(AVHubertPretrainingTask):
             f"{self.get_label_dir()}/{split}.{l}" for l in self.cfg.labels
         ]
         image_aug = self.cfg.image_aug if split == 'train' else False
+        if self.cfg.skip_aug:
+            image_aug = False
         noise_fn, noise_snr = f"{self.cfg.noise_wav}/{split}.tsv" if self.cfg.noise_wav is not None else None, eval(self.cfg.noise_snr)
         noise_num = self.cfg.noise_num # 
 
@@ -96,7 +100,8 @@ class Lip2SpeechTask(AVHubertPretrainingTask):
             noise_num=noise_num,
             time_mask=self.cfg.time_mask,
             random_erase=self.cfg.random_erase,
-            text_supervision=self.cfg.text_supervision
+            text_supervision=self.cfg.text_supervision,
+            auto_avsr=self.cfg.auto_avsr
         )
 
     def build_generator(

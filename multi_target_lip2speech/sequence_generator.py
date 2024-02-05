@@ -120,7 +120,7 @@ class MultiTargetSequenceGenerator(SequenceGenerator):
             mels = [mel[:target_length*2] for mel, target_length in zip(mels, sample['target_lengths'])]
             sample['mels'] = mels
 
-        if encoder_outs[0]['encoder_char'] is not None:
+        if 'encoder_char' in encoder_outs[0]:
             encoder_char = encoder_outs[0]['encoder_char'].cpu()  # output = T, 1, C (1 sample in batch)
             encoder_char_softmax = torch.nn.functional.softmax(encoder_char, dim=2)[:, 0, :]  # output = T, C
             

@@ -51,6 +51,8 @@ class MultiTargetAutoAVSREncoderModel(FairseqEncoderModel):
         for param in self.encoder.parameters():
             param.requires_grad = False
 
+        logger.info('AUTO-AVSR PRETRAINED FRONTEND LOADED')
+
     @classmethod
     def build_model(cls, cfg, task):
         """Build a new model instance."""
