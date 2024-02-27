@@ -28,6 +28,9 @@ else:
     from avhubert.hubert_dataset import load_audio_visual, load_label, load_label_offset, verify_label_lengths, AVHubertDataset
     from .helpers import SentenceProcessor
 
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from helpers import load_groundtruth_data
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,14 +69,14 @@ class MultiTargetDataset(AVHubertDataset):
             time_mask: bool = False,
             random_erase: bool = False,
             text_supervision: bool = False,
-            auto_avsr: bool = False
+            grayscale_transform: bool = False
     ):
         # load gt if available
         self.gt_path = gt_path
         self.text_supervision = text_supervision and Path(gt_path).exists()
         self.sentence_processor = SentenceProcessor() if self.text_supervision else None
         self.gt_d = self.load_gt_data(gt_path=gt_path) if self.text_supervision else None
-        self.auto_avsr = auto_avsr
+        self.grayscale_transform = grayscale_transform
 
         self.label_rates = (
             [label_rates for _ in range(len(label_paths))]
@@ -128,7 +131,7 @@ class MultiTargetDataset(AVHubertDataset):
         self.pad_audio = pad_audio
         self.normalize = normalize
         if image_aug:
-            if self.auto_avsr:
+            if self.grayscale_transform:
                 transforms = [
                     custom_utils.Normalize(0.0, 255.0),
                     custom_utils.RandomCrop((image_crop_size, image_crop_size)),
@@ -148,7 +151,7 @@ class MultiTargetDataset(AVHubertDataset):
             transforms += [custom_utils.TimeMask()] if time_mask else []
             self.transform = custom_utils.Compose(transforms)
         else:
-            if self.auto_avsr:
+            if self.grayscale_transform:
                 transforms = [
                     custom_utils.Normalize(0.0, 255.0),
                     custom_utils.CenterCrop((image_crop_size, image_crop_size)),
@@ -174,8 +177,6 @@ class MultiTargetDataset(AVHubertDataset):
         )
 
     def load_gt_data(self, gt_path):
-        from helpers import load_groundtruth_data
-        
         gt_df = load_groundtruth_data(gt_path, skip_lines=True)[0]
         
         return {
@@ -211,8 +212,8 @@ class MultiTargetDataset(AVHubertDataset):
         return mel, spk_emb
 
     def load_video(self, audio_name):
-        if not self.auto_avsr:
-            return super().load_video(audio_name)
+        if not self.grayscale_transform:
+            return super().load_video(audio_name)  # loads in grayscale by default
 
         # read video in colour (BGR), convert to grayscale later
         feats = custom_utils.load_video(os.path.join(self.audio_root, audio_name), grayscale=False)

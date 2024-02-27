@@ -45,7 +45,7 @@ from helpers import WhisperASR, bytes_to_frame, convert_fps, convert_video_codec
 # fix semaphore locking on failed requests e.g. 500s
 # RAM growing - memory leak in decoders
 
-asr = WhisperASR(model='base.en', device='cpu')
+asr = WhisperASR(model='base.en', device=os.environ.get('WHISPER_DEVICE', 'cpu'))
 sem = threading.Semaphore()
 stream_sem = threading.Semaphore()
 video_frames = []
@@ -288,7 +288,12 @@ def create_app(args=None, args_path=None):
             return {'message': 'Failed to run synthesiser'}, HTTPStatus.INTERNAL_SERVER_ERROR
 
         # setup vocoder directory
-        setup_vocoder_inference(SimpleNamespace(**{'type': config.TYPE, 'dataset_directory': config.WORKING_DIRECTORY, 'synthesis_directory': config.SYNTHESIS_DIRECTORY}))
+        setup_vocoder_inference(SimpleNamespace(**{
+            'type': config.TYPE, 
+            'dataset_directory': config.WORKING_DIRECTORY, 
+            'synthesis_directory': config.SYNTHESIS_DIRECTORY,
+            'text_labels': False
+        }))
 
         # run vocoder
         response = execute_request('VOCODER', requests.post, f'http://127.0.0.1:{config.VOCODER_PORT}/vocoder')
@@ -602,18 +607,16 @@ def create_app(args=None, args_path=None):
     if args.prod:
         return app
 
-    socketio.run(app, port=args.port, debug=config.DEBUG, use_reloader=False)
+    socketio.run(app, host='0.0.0.0', port=args.port, debug=config.DEBUG, use_reloader=False)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('default_audios', type=lambda s: json.loads(s))
-    parser.add_argument('default_audio')
-    parser.add_argument('--web_client_run_asr', action='store_true')
-    parser.add_argument('--web_client_streaming', action='store_true')
+    parser.add_argument('args_path')
     parser.add_argument('--port', type=int, default=5002)
 
-    args = parser.parse_args()
-    args.prod = False
+    cl_args = parser.parse_args()
+    args = setup(cl_args, cl_args.args_path)
+    args.port = cl_args.port
 
     create_app(args)

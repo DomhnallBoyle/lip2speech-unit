@@ -148,8 +148,13 @@ def init_process(process_index, args, sample_paths):
 
         video_path = str(video_path)
 
-        # resize if necessary
+        # get FPS, ignore video if too low
         fps = get_fps(video_path=video_path)
+        if args.fps_buffer and fps < (config.FPS - args.fps_buffer):
+            print(f'{video_path}: low fps ({fps})...')
+            continue
+
+        # resize if necessary
         if args.resize:
             width, height = get_video_size(video_path=video_path)
             video_dims = get_updated_dims(width=width, height=height)
@@ -545,6 +550,7 @@ if __name__ == '__main__':
     parser_1a.add_argument('--num_samples', type=int)
     parser_1a.add_argument('--samples_path')
     parser_1a.add_argument('--max_duration', type=int)
+    parser_1a.add_argument('--fps_buffer', type=int)
     parser_1a.add_argument('--optimum_ros', type=float)
     parser_1a.add_argument('--redo', action='store_true')
 

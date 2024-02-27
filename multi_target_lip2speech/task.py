@@ -41,7 +41,7 @@ class Lip2SpeechConfig(AVHubertPretrainingConfig):
     random_erase: bool = field(default=False)
     fp16: bool = field(default=False)
     text_supervision: bool = field(default=bool(int(os.environ.get('TEXT_SUPERVISION', 0))))
-    auto_avsr: bool = field(default=bool(int(os.environ.get('AUTO_AVSR', 0))))
+    grayscale_transform: bool = field(default=bool(int(os.environ.get('GRAYSCALE_TRANSFORM', 0))))  # RAVEn and Auto-AVSR use this
     skip_aug: bool = field(default=bool(int(os.environ.get('SKIP_AUG', 0))))
 
 
@@ -101,7 +101,7 @@ class Lip2SpeechTask(AVHubertPretrainingTask):
             time_mask=self.cfg.time_mask,
             random_erase=self.cfg.random_erase,
             text_supervision=self.cfg.text_supervision,
-            auto_avsr=self.cfg.auto_avsr
+            grayscale_transform=self.cfg.grayscale_transform
         )
 
     def build_generator(

@@ -278,9 +278,10 @@ def _main(cfg, output_file):
                 text_labels_save_path = os.path.join(cfg.common_eval.results_path, 'pred_text', sample['utt_id'][i] + '.txt')
                 os.makedirs(os.path.dirname(text_labels_save_path), exist_ok=True)
 
-                pred_text_labels = ' '.join([str(token) for token in sample['pred_text_labels']])
                 with open(text_labels_save_path, 'w') as f:
-                    f.write(pred_text_labels)
+                    for text_labels in sample['pred_text_labels']:
+                        pred_text_labels = ' '.join([str(token) for token in text_labels])
+                        f.write(f'{pred_text_labels}\n')
 
         wps_meter.update(num_generated_tokens)
         progress.log({"wps": round(wps_meter.avg)})

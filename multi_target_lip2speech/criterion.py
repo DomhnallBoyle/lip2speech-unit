@@ -102,7 +102,7 @@ class LabelSmoothedCrossEntropyCriterionLengthMatch(LabelSmoothedCrossEntropyCri
 
         if self.task.cfg.text_supervision:
             # log softmax for training, softmax for inference
-            log_probs = torch.nn.functional.log_softmax(net_output['encoder_char'], dim=2)  # requires T, B, C, 2nd dim = no. of classes
+            log_probs = torch.nn.functional.log_softmax(net_output['encoder_out_text'], dim=2)  # requires T, B, C, 2nd dim = no. of classes
             targets = sample['text_labels']  # 1D array, length = sum(text_labels_lengths)
             input_lengths = sample['input_lengths'] * 2  # remember repeat_interleave(2) used before conformer
             target_lengths = sample['text_labels_lengths']
@@ -115,11 +115,11 @@ class LabelSmoothedCrossEntropyCriterionLengthMatch(LabelSmoothedCrossEntropyCri
                 sample_gt_text_labels_length = sample['text_labels_lengths'][0]
                 sample_gt_text_labels = sample['text_labels'][:sample_gt_text_labels_length]
 
-                # net_output['encoder_char'] = T, B, C
+                # net_output['encoder_out_text'] = T, B, C
                 # softmax over no. classes and select first from batch
                 # use argmax for prediction over the classes
-                sample_encoder_char_softmax = torch.nn.functional.softmax(net_output['encoder_char'], dim=2)[:, 0, :]
-                sample_pred_text_labels = torch.argmax(sample_encoder_char_softmax, dim=1)
+                sample_encoder_text_softmax = torch.nn.functional.softmax(net_output['encoder_out_text'], dim=2)[:, 0, :]
+                sample_pred_text_labels = torch.argmax(sample_encoder_text_softmax, dim=1)
 
                 # NOTE: during training, text labels from argmax is sparse matrix of blanks with some word tokens in between
                 # as training continues, these word tokens are usually close to groundtruth text when decoded here
@@ -129,7 +129,7 @@ class LabelSmoothedCrossEntropyCriterionLengthMatch(LabelSmoothedCrossEntropyCri
                 sample_pred_text = self.sentence_processor.decode(sample_pred_text_labels)
 
                 logger.info(f'-----------------------------------------')
-                logger.info((sample_encoder_char_softmax.shape, sample_pred_text_labels))
+                logger.info((sample_encoder_text_softmax.shape, sample_pred_text_labels))
                 logger.info(f'G Text: "{sample_gt_text}"')
                 logger.info(f'P Text: "{sample_pred_text}"')
 

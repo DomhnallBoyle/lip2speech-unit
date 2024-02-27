@@ -11,6 +11,7 @@ fairseq
 *.json
 *.log
 *.dat
+!*custom_shape_predictor.dat
 *.npy
 *.db
 *.env

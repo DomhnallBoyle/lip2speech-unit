@@ -69,8 +69,8 @@ def train(rank, local_rank, a, h):
         state_dict_do = None
         last_epoch = -1
     else:
-        state_dict_g = load_checkpoint(cp_g, device)
-        state_dict_do = load_checkpoint(cp_do, device)
+        state_dict_g = load_checkpoint(cp_g, device='cpu')
+        state_dict_do = load_checkpoint(cp_do, device='cpu')
         generator.load_state_dict(state_dict_g['generator'])
         mpd.load_state_dict(state_dict_do['mpd'])
         msd.load_state_dict(state_dict_do['msd'])

@@ -1,0 +1,1 @@
+TEXT_SUPERVISION=1 python train.py configs/lrs3/multi_input_aug_text_labels.json /home/domhnall/Datasets/lip2speech-unit/lrs3_text_labels_vocoder/vocoder/label --checkpoint_path=checkpoints/lrs3/multi_input_4_text_supervision --training_steps=1000000

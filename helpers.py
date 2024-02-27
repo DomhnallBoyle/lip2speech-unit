@@ -20,7 +20,7 @@ from sv2s.asr import WhisperASR
 from sv2s.denoise import denoise_audio
 from sv2s.detector import filter_landmarks, get_face_landmarks as get_ibug_landmarks, get_mouth_frames, init_facial_detectors as init_ibug_facial_detectors
 from sv2s.preprocessor import generate_speaker_content_mapping, get_speaker_embedding_video_path
-from sv2s.utils import convert_fps, convert_video_codecs, crop_video, ffmpeg_time, get_fps, get_sample_rate, get_speaker_embedding, get_video_duration, \
+from sv2s.utils import convert_fps, convert_video_codecs, crop_video, expand_contractions, ffmpeg_time, get_fps, get_sample_rate, get_speaker_embedding, get_video_duration, \
     get_viseme_distance, get_words_to_phonemes_d, get_words_to_visemes_d, load_groundtruth_data, overlay_audio, split_list
 
 FFMPEG_PATH = 'ffmpeg'

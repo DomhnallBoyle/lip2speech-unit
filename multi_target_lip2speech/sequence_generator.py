@@ -7,17 +7,35 @@
 import math
 from typing import Dict, List, Optional
 
-import torch
-from torch import Tensor
-
 import os
 import numpy as np
+import torch
+from ctcdecode import CTCBeamDecoder
+from torch import Tensor
 
 from avhubert.sequence_generator import SequenceGenerator
+from .helpers import SentenceProcessor
+
+
 class MultiTargetSequenceGenerator(SequenceGenerator):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        self.use_ctc_beam_search_decoding = bool(int(os.environ.get('CTC_BS_DECODING', 0)))
+        self.sp = SentenceProcessor() if self.use_ctc_beam_search_decoding else None
+        self.ctc_decoder = CTCBeamDecoder(
+            self.sp.classes,
+            model_path=None,
+            alpha=0,
+            beta=0,
+            cutoff_top_n=40,
+            cutoff_prob=1.0,
+            beam_width=30,
+            num_processes=4,
+            blank_id=0,
+            log_probs_input=False
+        ) if self.use_ctc_beam_search_decoding else None
 
     def _generate(
         self,
@@ -120,16 +138,37 @@ class MultiTargetSequenceGenerator(SequenceGenerator):
             mels = [mel[:target_length*2] for mel, target_length in zip(mels, sample['target_lengths'])]
             sample['mels'] = mels
 
-        if 'encoder_char' in encoder_outs[0]:
-            encoder_char = encoder_outs[0]['encoder_char'].cpu()  # output = T, 1, C (1 sample in batch)
-            encoder_char_softmax = torch.nn.functional.softmax(encoder_char, dim=2)[:, 0, :]  # output = T, C
+        if 'encoder_out_text' in encoder_outs[0]:
+            encoder_text = encoder_outs[0]['encoder_out_text'].cpu()  # output = T, 1, C (1 sample in batch)
+            encoder_text_softmax = torch.nn.functional.softmax(encoder_text, dim=2)  # output = T, 1, C
             
-            # argmax is naive inference
-            pred_text_labels = torch.argmax(encoder_char_softmax, dim=1)  # output = T
-
-            # TODO: replace repeating tokens with blanks?
             # see inference section in this link: https://distill.pub/2017/ctc/
-            sample['pred_text_labels'] = pred_text_labels.numpy().tolist()
+
+            if self.use_ctc_beam_search_decoding:
+                # expects input B, T, C
+                # beam_results: B, N_BEAMS, N_TIMESTEPS - ints representing text at each timestep for each beam of a batch item
+                #       to see the top beam (as int labels) from the first item in the batch: beam_results[0][0][:out_lens[0][0]]
+                # beam_scores: B, N_BEAMS - ctc score for each beam, model confidence that beam correct p = 1 / np.exp(beam_score)
+                # timesteps: B, N_BEAMS - the timestep of each beam where peak probability occurs
+                # out_lens: B, N_BEAMS - out_lens[i][j] = jth beam length of item i in batch
+                beam_results, beam_scores, timesteps, out_lens = self.ctc_decoder.decode(encoder_text_softmax.permute(1, 0, 2))
+                beam_results, beam_scores, timesteps, out_lens = beam_results[0], beam_scores[0], timesteps[0], out_lens[0]  # only 1 in each batch
+                
+                if len(beam_results) == 1:
+                    print(beam_results.shape)
+                    exit()
+
+                pred_text_labels = []
+                for i, beam in enumerate(beam_results[:3]):  # top 3 beams, scores in ascending order
+                    beam_text_labels = beam[:out_lens[i]]
+                    pred_text_labels.append(beam_text_labels.tolist())
+            else:
+                # argmax is naive inference
+                # only 1 in batch, select it, output = T, C
+                pred_text_labels = torch.argmax(encoder_text_softmax[:, 0, :], dim=1)  # output = T
+                pred_text_labels = [pred_text_labels.numpy().tolist()]
+
+            sample['pred_text_labels'] = pred_text_labels
 
         # placeholder of indices for bsz * beam_size to hold tokens and accumulative scores
         new_order = torch.arange(bsz).view(-1, 1).repeat(1, beam_size).view(-1)

@@ -1,4 +1,5 @@
 import os
+import math
 import sys,logging
 import contextlib
 from argparse import Namespace
@@ -27,6 +28,7 @@ else:
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class MultiTargetEncoderModelConfig(AVHubertSeq2SeqConfig):
     checkpoint_path: Optional[str] = field(default=MISSING)
@@ -40,6 +42,7 @@ class MultiTargetEncoderModelConfig(AVHubertSeq2SeqConfig):
     conformer_layer_norm_first: bool = field(default=True)
     text_supervision: bool = field(default=bool(int(os.environ.get('TEXT_SUPERVISION', 0))))
 
+
 @dataclass
 class MultiTargetAutoAVSREncoderModelConfig(MultiTargetEncoderModelConfig):
     avsr_checkpoint_path: Optional[str] = field(default=os.environ.get('AVSR_CHECKPOINT_PATH'))
@@ -48,6 +51,17 @@ class MultiTargetAutoAVSREncoderModelConfig(MultiTargetEncoderModelConfig):
     encoder_linear_units: int = field(default=int(os.environ.get('ENCODER_LIN_UNITS', 3072)))
     encoder_num_blocks: int = field(default=int(os.environ.get('ENCODER_NUM_BLOCKS', 12)))
     # NOTE: AV-Hubert uses 1024/4096/16/24 for dims, units, heads and blocks respectively
+
+
+@dataclass
+class MultiTargetRAVENEncoderModelConfig(MultiTargetEncoderModelConfig):
+    raven_checkpoint_path: Optional[str] = field(default=os.environ.get('RAVEN_CHECKPOINT_PATH'))
+    encoder_idim: int = field(default=int(os.environ.get('ENCODER_IDIM', 512)))
+    encoder_attention_dim: int = field(default=int(os.environ.get('ENCODER_ATTN_DIM', 1024)))  # default values taken from RAVEN model config
+    encoder_attention_heads: int = field(default=int(os.environ.get('ENCODER_ATTN_HEADS', 16)))
+    encoder_linear_units: int = field(default=int(os.environ.get('ENCODER_LIN_UNITS', 4096)))
+    encoder_num_blocks: int = field(default=int(os.environ.get('ENCODER_NUM_BLOCKS', 24)))
+
 
 @register_model("multi_target", dataclass=MultiTargetAutoAVSREncoderModelConfig)
 class MultiTargetEncoderModel(FairseqEncoderModel):
@@ -236,7 +250,6 @@ class Conformer(FairseqEncoder):
         return state_dict
     
 
-import math
 class MLP(nn.Module):
     def __init__(
         self,

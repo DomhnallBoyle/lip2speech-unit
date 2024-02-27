@@ -20,6 +20,24 @@ from dataset import MAX_WAV_VALUE, load_audio, mel_spectrogram, CodeDataset
 sys.path.pop(0)
 
 
+def repeat(text_labels):
+    new_text_labels = [text_labels[0]]
+    current_label = text_labels[0]
+    i = 1
+
+    while i < len(text_labels):
+        next_label = text_labels[i]
+        if next_label != 0 and next_label != current_label:
+            current_label = next_label
+
+        new_text_labels.append(current_label)
+        i += 1
+
+    assert len(new_text_labels) == len(text_labels), f'{len(new_text_labels)} != {len(text_labels)}'
+
+    return new_text_labels
+
+
 def parse_manifest(manifest_path, max_keep=None, min_keep=None):
     n_long, n_short, n_unaligned = 0, 0, 0
     audio_files, sizes, mels, codes, t_labels = [], [], [], [], []
@@ -28,6 +46,7 @@ def parse_manifest(manifest_path, max_keep=None, min_keep=None):
     t_labels_path = Path(manifest_path).with_suffix('.txt')
 
     text_supervision = bool(int(os.environ.get('TEXT_SUPERVISION', 0))) and t_labels_path.exists()
+    repeat_text_labels = bool(int(os.environ.get('REPEAT_TEXT_LABELS', 0))) and text_supervision
 
     print(f'manifest_path: {manifest_path}')
     print(f'code_path: {code_path}')
@@ -65,7 +84,9 @@ def parse_manifest(manifest_path, max_keep=None, min_keep=None):
                     codes.append(code)
 
                     if text_supervision:
-                        t_label = t_labels_f.readline().strip()
+                        t_label = [int(x) for x in t_labels_f.readline().strip().split(' ')]
+                        if repeat_text_labels:
+                            t_label = repeat(text_labels=t_label)
                         t_labels.append(t_label)
 
     if text_supervision:
@@ -152,7 +173,8 @@ class MelCodeDataset(CodeDataset):
         if self.multispkr:
             self.speaker_emb_files = [f.replace('/audio/', '/spk_emb/')[:-4]+'.npy' for f in self.audio_files]
 
-        self.code_dict = load_code_dict(code_dict_path)
+        self.code_dict_path = code_dict_path
+        self.code_dict = load_code_dict(self.code_dict_path)
         self.collapse_code = False
 
         self.use_blur = use_blur
@@ -202,7 +224,7 @@ class MelCodeDataset(CodeDataset):
 
         t_label = None
         if self.text_supervision:
-            t_label = np.asarray(self.t_labels[index].split(' ')).astype(np.int)
+            t_label = np.asarray(self.t_labels[index]).astype(np.int)
             t_label = t_label[:code_length]
             assert t_label.shape[0] == code.shape[0], f'{filename}: {t_label.shape[0]} != {code.shape[0]}'
 

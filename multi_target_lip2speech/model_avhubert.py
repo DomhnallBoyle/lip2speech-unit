@@ -292,7 +292,7 @@ class Conformer(FairseqEncoder):
         }
 
         if self.text_classifier:
-            out['encoder_char'] = self.text_classifier(x)
+            out['encoder_out_text'] = self.text_classifier(x)
 
         return out
 

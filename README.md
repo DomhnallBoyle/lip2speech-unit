@@ -1,28 +1,55 @@
 # Intelligible Lip-to-Speech Synthesis with Speech Units
 
-Official PyTorch implementation for the following paper:
+<b>Adaptation</b> of the official PyTorch implementation for the following paper:
+
 > **Intelligible Lip-to-Speech Synthesis with Speech Units**<br>
 > [Jeongsoo Choi](https://scholar.google.com/citations?user=WPcjsEkAAAAJ), [Minsu Kim](https://sites.google.com/view/ms-dot-k), [Yong Man Ro](https://ivylab.kaist.ac.kr/base/people/people1.php)<br>
 > Interspeech 2023<br>
-> \[[Paper](https://arxiv.org/abs/2305.19603)\] \[[Project](https://choijeongsoo.github.io/lip2speech-unit)\]
+> \[[Paper](https://arxiv.org/abs/2305.19603)\] \[[Project](https://choijeongsoo.github.io/lip2speech-unit)\] \[[Official Code](https://github.com/choijeongsoo/lip2speech-unit.git)]
 
 <div align="center"><img width="80%" src="imgs/fig1.png?raw=true"/></div>
 
+## Requirements
+- Python3.10
+- PyTorch w/ CUDA 11.6
+- Docker, Docker-compose and nvidia-docker
+- [sv2s](http://github.com/DomhnallBoyle/sv2s)
+- Speaker embedding server @ [Lip2Wav](http://github.com/DomhnallBoyle/Lip2Wav)
+- DLIB CNN face detector [mmod_human_face_detector.dat](https://github.com/davisking/dlib-models)
+
 ## Installation
 ```
-conda create -y -n lip2speech python=3.10
-conda activate lip2speech
-pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu116
-pip install -r requirements.txt
+# create/activate python virtual env using venv
+python3.10 -m venv /home/$USER/Envs/lip2speech-unit
+source /home/$USER/Envs/lip2speech-unit/bin/activate
 
-git clone https://github.com/choijeongsoo/lip2speech-unit.git
+# clone and install the repo dependencies
+git clone https://github.com/DomhnallBoyle/lip2speech-unit.git
 cd lip2speech-unit
+pip install --extra-index-url https://download.pytorch.org/whl/cu116 -r requirements.txt
 git clone https://github.com/facebookresearch/fairseq.git
 cd faireq
 git checkout afc77bd
 pip install -e ./
-cd ..
 
+# build/run the DLIB landmark predictor and mouth cropper
+# also runs the redis server
+docker-compose up --force-recreate
+
+# [optional] if running in production for HTTPS
+./generate_SSL_keys.sh
+
+# run the flask server - see file contents for startup options
+PROD=1 ./start_server.sh
+```
+
+## Usage
+```
+/demo - Web-app demo of the system using the webcam or uploading your own short videos
+
+/vsg - Web-app for uploading and synthesising long videos (NOTE: requires DECODER_CPU=1)
+
+See server.py for a list of API calls
 ```
 
 ## Data Preparation
@@ -34,7 +61,7 @@ cd ..
 
 #### Speech Units
 * reference: https://github.com/facebookresearch/fairseq/tree/main/examples/textless_nlp/gslm/speech2unit
-- HuBERT Base + KM200
+- 6th layer of HuBERT Base + KM200
 
 #### Speaker Embedding
 * reference: https://github.com/CorentinJ/Real-Time-Voice-Cloning
@@ -59,6 +86,15 @@ We provide sample data in 'datasets/lrs3' directory.
 
 <details open>
 
+<summary><b>Custom</b> DLIB landmark predictor</summary>
+Trained on iBUG landmarks, this DLIB based model predicts the inner face instead of all 68 landmark points i.e. it excludes the outer face points. 
+
+The model is available [here](./avhubert/preparation/custom_shape_predictor.dat)
+
+</details>  
+
+<details open>
+
 <summary>Lip Reading Sentences 3 (LRS3)</summary>
 
 <p> </p>
@@ -68,6 +104,7 @@ We provide sample data in 'datasets/lrs3' directory.
 | [Multi-target Lip2Speech](https://drive.google.com/file/d/1sFtoczuEmQaQXszCadCnNn6Itiohn5bN/view?usp=sharing) | [Multi-input Vocoder](https://drive.google.com/file/d/1WdbOFwUy-0eGvK2vT691ZsbqRAN9_Tgw/view?usp=sharing) | 0.552 | 0.354 | 1.31 | 50.4 |
 | [Multi-target Lip2Speech](https://drive.google.com/file/d/1sFtoczuEmQaQXszCadCnNn6Itiohn5bN/view?usp=sharing) | [Multi-input Vocoder<br/>+ augmentation](https://drive.google.com/file/d/13zimLyyXluQ2RuXbBk2b3S9LnBnfLptj/view?usp=sharing) | 0.543 | 0.351 | 1.28 | 50.2 |
 | [Multi-target Lip2Speech<br/>+ AV-HuBERT](https://drive.google.com/file/d/1oS80l6zpIfMTVKwvaHUSOC9ByjzGibSp/view?usp=sharing) | [Multi-input Vocoder<br/>+ augmentation](https://drive.google.com/file/d/13zimLyyXluQ2RuXbBk2b3S9LnBnfLptj/view?usp=sharing) | 0.578 | 0.393 | 1.31 | 29.8 |
+| [Multi-target Lip2Speech<br/>+ RAVEn (<b>Custom</b>)](https://drive.google.com/file/d/1woH6JK1iZI_XWBnla8fEn3Pn4iY7Ipjr/view?usp=sharing) | - | - | - | - | - |
 
 </details>
 

@@ -1,0 +1,4 @@
+precision: 32
+gpus: -1
+num_nodes: 1
+replace_sampler_ddp: False

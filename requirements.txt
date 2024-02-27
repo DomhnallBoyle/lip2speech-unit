@@ -102,3 +102,5 @@ syllables==1.0.9
 sentencepiece==0.1.99
 h5py==3.10.0
 pytube==15.0.0
+dlib==19.24.2
+git+https://github.com/parlance/ctcdecode.git@c90ad94#egg=ctcdecode
