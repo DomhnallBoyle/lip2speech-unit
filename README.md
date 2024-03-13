@@ -16,6 +16,7 @@
 - [sv2s](http://github.com/DomhnallBoyle/sv2s)
 - Speaker embedding server @ [Lip2Wav](http://github.com/DomhnallBoyle/Lip2Wav)
 - DLIB CNN face detector [mmod_human_face_detector.dat](https://github.com/davisking/dlib-models)
+- Audio noise reduction [rnnoise](https://gitlab.xiph.org/xiph/rnnoise) - see ```config.py```
 
 ## Installation
 ```
