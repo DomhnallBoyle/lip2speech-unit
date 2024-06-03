@@ -177,6 +177,9 @@ def create_app(args=None, args_path=None):
         # convert size if applicable to prevent GPU memory overload
         fps = get_fps(video_path=video_upload_path)
         width, height = get_video_size(video_path=video_upload_path)
+        if width == 0 or height == 0:
+            return {'message': 'Invalid video, zero dims detected'}, HTTPStatus.BAD_REQUEST
+
         video_dims = get_updated_dims(width=width, height=height)
         if video_dims != (width, height):
             logging.info(f'Resizing video with (w, h) from ({width}, {height}) to {video_dims}')
