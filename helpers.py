@@ -312,7 +312,12 @@ def get_video_frames(video_path):
 
 
 def get_num_video_frames(video_path):
-    return len(list(get_video_frames(video_path=video_path)))
+    frame_count = 0
+
+    for _ in get_video_frames(video_path=video_path):
+        frame_count += 1
+
+    return frame_count
 
 
 def alter_video_speed(video_path, output_video_path, speed):
